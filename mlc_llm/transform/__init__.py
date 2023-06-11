@@ -4,3 +4,4 @@ from .quantization import GroupQuantize
 from .reorder_transform_func import ReorderTransformFunc
 from .rwkv_quantization import RWKVQuantize
 from .transpose_matmul import FuseTransposeMatmul
+from .gemv import ApplyDefaultGEMVSchedule

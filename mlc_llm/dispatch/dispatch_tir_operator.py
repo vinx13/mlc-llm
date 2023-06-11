@@ -34,5 +34,7 @@ class DispatchTIROperator:  # pylint: disable=too-few-public-methods
             if scheduled_func is not None:
                 mod[gv] = scheduled_func
                 print("- Dispatch to pre-scheduled op:", gv.name_hint)
+            else:
+                print("- No pre-scheduled op found:", gv.name_hint)
 
         return mod

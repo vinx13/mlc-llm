@@ -324,6 +324,7 @@ def build(mod_deploy: tvm.IRModule, args: argparse.Namespace) -> None:
                 mod_deploy = mlc_llm.dispatch.DispatchTIROperatorAdreno()(  # pylint: disable=not-callable
                     mod_deploy
                 )
+            mod_deploy = mlc_llm.transform.ApplyDefaultGEMVSchedule()(mod_deploy)
             mod_deploy = relax.transform.MetaScheduleApplyDatabase()(mod_deploy)
             mod_deploy = (
                 mlc_llm.dispatch.DispatchTIROperator(  # pylint: disable=not-callable
