@@ -213,6 +213,15 @@ class BuildArgs:
             "action": "store_true",
         },
     )
+    lora_rewrite_targets: str = field(
+        default="none",
+        metadata={
+            "help": "The optional path to the LORA model",
+            "choices": ["none", "q_proj", "k_proj", "v_proj", "o_proj"],
+            "nargs": "+",
+        },
+    )
+    lora_r: int = field(default=-1)
 
 
 def convert_build_args_to_argparser() -> argparse.ArgumentParser:
@@ -546,7 +555,8 @@ def build_model_from_args(args: argparse.Namespace):
             config = json.load(i_f)
     if not use_cache or args.convert_weight_only:
         if args.model_category == "llama":
-            mod, param_manager, params = llama.get_model(args, config)
+            lora_config = llama.LoraConfig(args.lora_r, args.lora_rewrite_targets)
+            mod, param_manager, params = llama.get_model(args, config, lora_config)
         elif args.model_category == "gpt_neox":
             mod, param_manager, params = gpt_neox.get_model(args, config)
         elif args.model_category == "gpt_bigcode":

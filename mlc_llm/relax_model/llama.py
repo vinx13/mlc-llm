@@ -71,6 +71,30 @@ class Linear(nn.Module):
         return nn.emit(relax.op.linear(input, self.weight, self.bias))
 
 
+@dataclass
+class LoraConfig:
+    def __init__(self, r, targets_modules):
+        self.r = r
+        self.targets_modules = targets_modules
+
+
+class LoraLinear(nn.Module):
+    """Lora implemented in a dense layer. No bias."""
+
+    def __init__(self, in_features, out_features, dtype: str, config: LoraConfig):
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter((out_features, in_features), dtype=dtype, name="linear_weight")
+        self.lora_A = nn.Placeholder((config.r, in_features), dtype=dtype, name="lora_A")
+        self.lora_B = nn.Placeholder((out_features, config.r), dtype=dtype, name="lora_B")
+
+    def forward(self, input: relax.Expr) -> relax.Var:
+        w0x = nn.emit(relax.op.linear(input, self.weight))
+        ax = nn.emit(relax.op.linear(input, self.lora_A))
+        bax = nn.emit(relax.op.linear(ax, self.lora_B))
+        return nn.emit(w0x + bax)
+
+
 class Embedding(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, dtype: str):
         self.num_embeddings = num_embeddings
@@ -194,9 +218,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, offset: int = 0):
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, lora_config: LoraConfig):
         dtype = config.dtype
         self.hidden_size = config.hidden_size
+        self.lora_config = lora_config
         self.num_key_value_heads = (
             config.num_key_value_heads is None
             and config.num_attention_heads
@@ -206,6 +231,9 @@ class LlamaAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_query_heads
 
         self.combine_matmul = config.combine_matmul
+        if lora_config is not None:
+            self.combine_matmul = False
+
         if self.combine_matmul:
             self.query_key_value_proj = Linear(
                 self.hidden_size,
@@ -214,26 +242,27 @@ class LlamaAttention(nn.Module):
                 bias=False,
             )
         else:
-            self.q_proj = Linear(
-                self.hidden_size,
-                self.num_query_heads * self.head_dim,
-                dtype=dtype,
-                bias=False,
+            lora_target_modules = self.lora_config.targets_modules
+            for mod in ["q_proj", "k_proj", "v_proj"]:
+                in_features, out_features = (
+                    self.hidden_size,
+                    (self.num_query_heads if mod == "q_proj" else self.num_key_value_heads)
+                    * self.head_dim,
+                )
+                if mod in lora_target_modules:
+                    setattr(
+                        self,
+                        mod,
+                        LoraLinear(in_features, out_features, dtype=dtype, config=lora_config),
+                    )
+                else:
+                    setattr(self, mod, Linear(in_features, out_features, dtype=dtype, bias=False))
+        if "o_proj" in lora_target_modules:
+            self.o_proj = LoraLinear(
+                self.hidden_size, self.hidden_size, dtype=dtype, config=lora_config
             )
-            self.k_proj = Linear(
-                self.hidden_size,
-                self.num_key_value_heads * self.head_dim,
-                dtype=dtype,
-                bias=False,
-            )
-            self.v_proj = Linear(
-                self.hidden_size,
-                self.num_key_value_heads * self.head_dim,
-                dtype=dtype,
-                bias=False,
-            )
-
-        self.o_proj = Linear(self.hidden_size, self.hidden_size, dtype=dtype, bias=False)
+        else:
+            self.o_proj = Linear(self.hidden_size, self.hidden_size, dtype=dtype, bias=False)
 
     def forward(
         self,
@@ -394,9 +423,9 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, lora_config: LoraConfig):
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(config)
+        self.self_attn = LlamaAttention(config, lora_config)
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(
             config.hidden_size, dtype=config.dtype, eps=config.rms_norm_eps
@@ -489,7 +518,7 @@ class LlamaEmbedTokensWrapper(nn.Module):
 
 
 class LlamaModel(nn.Module):
-    def __init__(self, config: LlamaConfig, sep_embed: bool = False):
+    def __init__(self, config: LlamaConfig, lora_config: LoraConfig, sep_embed: bool = False):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = None
@@ -498,7 +527,7 @@ class LlamaModel(nn.Module):
             self.embed_tokens = Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
 
         self.layers = ModuleList(
-            [LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, lora_config) for _ in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, dtype=config.dtype, eps=config.rms_norm_eps)
 
@@ -569,8 +598,8 @@ class LlamaModel(nn.Module):
 
 
 class LlamaForCausalLM(nn.Module):
-    def __init__(self, config: LlamaConfig, sep_embed: bool = False):
-        self.model = LlamaModel(config, sep_embed)
+    def __init__(self, config: LlamaConfig, lora_config: LoraConfig, sep_embed: bool = False):
+        self.model = LlamaModel(config, lora_config, sep_embed)
         self.lm_head = Linear(config.hidden_size, config.vocab_size, dtype=config.dtype, bias=False)
 
         ############ Rotary embedding constants ############
@@ -657,6 +686,7 @@ def create_encoding_func(
     param_manager: ParamManager,
     config: LlamaConfig,
     quant_scheme: QuantizationScheme,
+    lora_config: LoraConfig,
     sep_embed: bool = False,
 ) -> None:
     func_name = "prefill_with_embed" if sep_embed else "prefill"
@@ -666,7 +696,7 @@ def create_encoding_func(
     all_seq_len = tvm.tir.Var("m", "int64")
     hidden_size = config.hidden_size
     with bb.function(func_name):
-        model = LlamaForCausalLM(config, sep_embed)
+        model = LlamaForCausalLM(config, lora_config, sep_embed)
         param_manager.register_params(model, func_name, quant_scheme, get_param_quant_kind)
 
         inputs = (
@@ -703,6 +733,7 @@ def create_decoding_func(
     param_manager: ParamManager,
     config: LlamaConfig,
     quant_scheme: QuantizationScheme,
+    lora_config: LoraConfig,
 ) -> None:
     func_name = "decode"
 
@@ -710,7 +741,7 @@ def create_decoding_func(
     all_seq_len = tvm.tir.Var("n", "int64")
 
     with bb.function(func_name):
-        model = LlamaForCausalLM(config)
+        model = LlamaForCausalLM(config, lora_config)
         param_manager.register_params(model, func_name, quant_scheme, get_param_quant_kind)
 
         input_ids = nn.Placeholder((bsz, 1), dtype="int32", name="input_ids")
@@ -781,7 +812,7 @@ def create_softmax_func(bb: relax.BlockBuilder, config: LlamaConfig) -> None:
         bb.emit_func_output(gv, [logits, temperature])
 
 
-def get_model(args, hf_config):
+def get_model(args, hf_config, lora_config: LoraConfig):
     model_name = args.model
     dtype = args.quantization.model_dtype
     max_seq_len = args.max_seq_len
@@ -790,7 +821,7 @@ def get_model(args, hf_config):
     config = LlamaConfig(
         **hf_config,
         dtype=dtype,
-        combine_matmul=True,
+        combine_matmul=False,
     )
     if max_seq_len != -1:
         config.max_sequence_length = max_seq_len
@@ -799,8 +830,8 @@ def get_model(args, hf_config):
     bb = relax.BlockBuilder()
     if sep_embed:
         create_embed_func(bb, param_manager, config, args.quantization)
-    create_encoding_func(bb, param_manager, config, args.quantization, sep_embed)
-    create_decoding_func(bb, param_manager, config, args.quantization)
+    create_encoding_func(bb, param_manager, config, args.quantization, lora_config, sep_embed)
+    create_decoding_func(bb, param_manager, config, args.quantization, lora_config)
     create_kv_cache_func(bb, config)
     create_softmax_func(bb, config)
     create_metadata_func(
