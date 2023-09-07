@@ -363,7 +363,6 @@ def mod_transform_before_build(
         mod
     )  # pylint: disable=not-callable
 
-
     if hasattr(config, "num_attention_heads") and hasattr(config, "hidden_size"):
         max_seq_len = None
         if args.max_seq_len > 0:
@@ -555,7 +554,7 @@ def build_model_from_args(args: argparse.Namespace):
         elif args.model_category == "gpt_neox":
             mod, param_manager, params, model_config = gpt_neox.get_model(args, config)
         elif args.model_category == "gpt_bigcode":
-            mod, param_manager, params, model_config= gpt_bigcode.get_model(args, config)
+            mod, param_manager, params, model_config = gpt_bigcode.get_model(args, config)
         elif args.model_category == "minigpt":
             mod, param_manager, params, model_config = minigpt.get_model(args)
         elif args.model_category == "gptj":
@@ -566,6 +565,8 @@ def build_model_from_args(args: argparse.Namespace):
             mod, param_manager, params, model_config = chatglm.get_model(args, config)
         else:
             raise ValueError(f"Model {args.model} not supported")
+
+        params = utils.gen_lora_weight_placeholders(param_manager, params, model_config)
 
         for qspec_updater_class in param_manager.qspec_updater_classes:
             qspec_updater = qspec_updater_class(param_manager)

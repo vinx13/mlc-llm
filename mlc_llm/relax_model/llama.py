@@ -1,10 +1,10 @@
 import math
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Callable
 
 import numpy as np
 import tvm
-from tvm import relax, te
+from tvm import relax, te, tir
 from tvm.relax.testing import nn
 from tvm.script import relax as R
 
@@ -58,17 +58,51 @@ class LlamaConfig:
 
 
 class Linear(nn.Module):
-    def __init__(self, in_features, out_features, dtype: str, bias=True):
+    lora_r: tir.Var = tir.Var("r", "int64")
+
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        dtype: str,
+        bias=True,
+        *,
+        f_lora_init: Callable[["Linear"], None] = None,
+        f_lora_forward: Callable[["Linear"], relax.Expr] = None,
+    ):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter((out_features, in_features), dtype=dtype, name="linear_weight")
+        self.f_lora_forward = f_lora_forward
         if bias:
             self.bias = nn.Parameter((out_features,), dtype=dtype, name="linear_bias")
         else:
             self.bias = None
+        if f_lora_init is None:
+            setattr(
+                self,
+                "lora_A.weight",
+                nn.Parameter((Linear.lora_r, in_features), dtype=dtype, name="lora_weight"),
+            )
+            setattr(
+                self,
+                "lora_B.weight",
+                nn.Parameter((out_features, Linear.lora_r), dtype=dtype, name="lora_weight"),
+            )
+        else:
+            f_lora_init(self)
 
     def forward(self, input: relax.Expr) -> relax.Var:
-        return nn.emit(relax.op.linear(input, self.weight, self.bias))
+        if self.f_lora_forward is None:
+            assert hasattr(self, "lora_A.weight"), "lora_A.weight attribuite is missing"
+            assert hasattr(self, "lora_B.weight"), "lora_B.weight attribuite is missing"
+            lora_weight = nn.emit(
+                relax.op.matmul(getattr(self, "lora_B.weight"), getattr(self, "lora_A.weight"))
+            )
+            updated_weight = nn.emit(relax.op.add(self.weight, lora_weight))
+        else:
+            updated_weight = self.f_lora_forward(self)
+        return nn.emit(relax.op.linear(input, updated_weight, self.bias))
 
 
 class Embedding(nn.Module):
@@ -143,7 +177,55 @@ class LlamaMLP(nn.Module):
 
         self.combine_matmul = config.combine_matmul
         if self.combine_matmul:
-            self.gate_up_proj = Linear(hidden_size, 2 * intermediate_size, dtype=dtype, bias=False)
+
+            def lora_init(_: Linear):
+                setattr(
+                    self,
+                    "gate_proj.lora_A.weight",
+                    nn.Parameter((Linear.lora_r, hidden_size), dtype=dtype, name="lora_weight"),
+                )
+                setattr(
+                    self,
+                    "gate_proj.lora_B.weight",
+                    nn.Parameter(
+                        (intermediate_size, Linear.lora_r), dtype=dtype, name="lora_weight"
+                    ),
+                )
+                setattr(
+                    self,
+                    "up_proj.lora_A.weight",
+                    nn.Parameter((Linear.lora_r, hidden_size), dtype=dtype, name="lora_weight"),
+                )
+                setattr(
+                    self,
+                    "up_proj.lora_B.weight",
+                    nn.Parameter(
+                        (intermediate_size, Linear.lora_r), dtype=dtype, name="lora_weight"
+                    ),
+                )
+
+            def lora_forward(linear: Linear):
+                lora_weights = [
+                    nn.emit(
+                        relax.op.matmul(
+                            getattr(self, f"{name}.lora_B.weight"),
+                            getattr(self, f"{name}.lora_A.weight"),
+                        )
+                    )
+                    for name in ["gate_proj", "up_proj"]
+                ]
+                lora_weight = nn.emit(relax.op.concat(lora_weights, axis=0))
+                updated_weight = nn.emit(relax.op.add(linear.weight, lora_weight))
+                return updated_weight
+
+            self.gate_up_proj = Linear(
+                hidden_size,
+                2 * intermediate_size,
+                dtype=dtype,
+                bias=False,
+                f_lora_init=lora_init,
+                f_lora_forward=lora_forward,
+            )
             self.down_proj = Linear(intermediate_size, hidden_size, dtype=dtype, bias=False)
         else:
             self.gate_proj = Linear(hidden_size, intermediate_size, dtype=dtype, bias=False)
@@ -207,11 +289,78 @@ class LlamaAttention(nn.Module):
 
         self.combine_matmul = config.combine_matmul
         if self.combine_matmul:
+
+            def lora_init(_: Linear):
+                setattr(
+                    self,
+                    "q_proj.lora_A.weight",
+                    nn.Parameter(
+                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                    ),
+                )
+                setattr(
+                    self,
+                    "q_proj.lora_B.weight",
+                    nn.Parameter(
+                        (self.num_query_heads * self.head_dim, Linear.lora_r),
+                        dtype=dtype,
+                        name="lora_weight",
+                    ),
+                )
+                setattr(
+                    self,
+                    "k_proj.lora_A.weight",
+                    nn.Parameter(
+                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                    ),
+                )
+                setattr(
+                    self,
+                    "k_proj.lora_B.weight",
+                    nn.Parameter(
+                        (self.num_key_value_heads * self.head_dim, Linear.lora_r),
+                        dtype=dtype,
+                        name="lora_weight",
+                    ),
+                )
+                setattr(
+                    self,
+                    "v_proj.lora_A.weight",
+                    nn.Parameter(
+                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                    ),
+                )
+                setattr(
+                    self,
+                    "v_proj.lora_B.weight",
+                    nn.Parameter(
+                        (self.num_key_value_heads * self.head_dim, Linear.lora_r),
+                        dtype=dtype,
+                        name="lora_weight",
+                    ),
+                )
+
+            def lora_forward(linear: Linear):
+                lora_weights = [
+                    nn.emit(
+                        relax.op.matmul(
+                            getattr(self, f"{name}.lora_B.weight"),
+                            getattr(self, f"{name}.lora_A.weight"),
+                        )
+                    )
+                    for name in ["q_proj", "k_proj", "v_proj"]
+                ]
+                lora_weight = nn.emit(relax.op.concat(lora_weights, axis=0))
+                updated_weight = nn.emit(relax.op.add(linear.weight, lora_weight))
+                return updated_weight
+
             self.query_key_value_proj = Linear(
                 self.hidden_size,
                 (self.num_query_heads + 2 * self.num_key_value_heads) * self.head_dim,
                 dtype=dtype,
                 bias=False,
+                f_lora_init=lora_init,
+                f_lora_forward=lora_forward,
             )
         else:
             self.q_proj = Linear(
@@ -620,6 +769,8 @@ def get_param_quant_kind(name: str, param_info: relax.TensorStructInfo) -> Param
         return ParamQuantKind.embedding_table
     elif "lm_head.weight" in name:
         return ParamQuantKind.final_fc_weight
+    elif "lora_A" in name or "lora_B" in name:
+        return ParamQuantKind.lora_weight
     elif param_info.ndim == 2 and name.endswith(".weight"):
         return ParamQuantKind.linear_weight
     else:

@@ -165,7 +165,8 @@ class FTQuantizeUpdater(QuantSpecUpdater._cls):
         if call.op != tvm.ir.Op.get("relax.matmul"):
             return
         rhs = self.lookup_binding(call.args[1])
-        assert rhs is not None
+        if rhs is None:
+            return
         if (
             rhs.op != tvm.ir.Op.get("relax.permute_dims")
             or rhs.attrs.axes is not None

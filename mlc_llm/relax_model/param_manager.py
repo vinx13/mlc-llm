@@ -247,6 +247,7 @@ class ParamManager:
             param = self._register_param(
                 name,
                 relax_param,
+                quant_kind,
                 getattr(quantization_scheme, quant_kind.name),
                 func_name,
             )
@@ -563,6 +564,7 @@ class ParamManager:
         self,
         name: str,
         var: relax.Var,
+        quant_kind: quantization.ParamQuantKind,
         quant_spec: quantization.QuantizationSpec,
         func_name: str,
     ) -> Parameter:
@@ -598,9 +600,10 @@ class ParamManager:
         assert isinstance(
             var.struct_info.shape, relax.ShapeExpr
         ), "The parameter to register is expected to have static shape"
-        assert all(
-            [isinstance(dim_len, tir.IntImm) for dim_len in var.struct_info.shape.values]
-        ), "The parameter to register is expected to have static shape"
+        if not quant_kind == quantization.ParamQuantKind.lora_weight:
+            assert all(
+                [isinstance(dim_len, tir.IntImm) for dim_len in var.struct_info.shape.values]
+            ), "The parameter to register is expected to have static shape, except lora weight placeholders"
 
         if name in self.params:
             # When the input name appears in `self.params`, it means the input
@@ -618,6 +621,9 @@ class ParamManager:
                 param.param_info.ndim == var.struct_info.ndim
             ), "Shape mismatch of one parameter in two functions."
             for len0, len1 in zip(param.param_info.shape.values, var.struct_info.shape.values):
+                if isinstance(len0, tir.Var) and isinstance(len1, tir.Var):
+                    # skip variable in shape of lora weight parameters
+                    continue
                 assert len0.value == len1.value, "Shape mismatch of one parameter in two functions."
         else:
             # Otherwise, the parameter is registered for the first time.

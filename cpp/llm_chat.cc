@@ -341,7 +341,28 @@ class LLMChat {
       LoadJSONOverride(app_config_json, true);
     }
 
+    // Step 7. Load LoRA indices from lora_indices_json.
+    std::ifstream lora_indices_istream((model_path + "/lora-indices.json").c_str());
+    std::ostringstream lora_indices_ostream;
+    ICHECK(lora_indices_istream);
+    lora_indices_ostream << lora_indices_istream.rdbuf();
+    std::string lora_indices_str = lora_indices_ostream.str();
+    picojson::value lora_indices_value;
+    picojson::parse(lora_indices_value, lora_indices_str);
+    auto lora_indices_obj = lora_indices_value.get<picojson::object>();
+    this->lora_indices.clear();
+    for (auto const& [key, value] : lora_indices_obj) {
+      ICHECK(value.is<int64_t>());
+      this->lora_indices[key] = value.get<int64_t>();
+    }
     this->ResetChat();
+  }
+
+  void ApplyLora(Map<String, NDArray> lora_weight) {
+    for (auto const& [key, value] : lora_weight) {
+      ICHECK(this->lora_indices.count(std::string(key)));
+      this->params_.Set(lora_indices.at(std::string(key)), value);
+    }
   }
 
   // TODO: remove the legacy initialization func after updating app and web sides.
@@ -1025,6 +1046,8 @@ class LLMChat {
   Array<ObjectRef> kv_cache_;
   // Temp logits on cpu
   NDArray logits_on_cpu_{nullptr};
+  // LoRA indices map
+  std::unordered_map<std::string, int64_t> lora_indices;
 };
 
 /*!
@@ -1164,6 +1187,12 @@ class LLMChatModule : public ModuleNode {
     } else if (name == "process_system_prompts") {
       return PackedFunc([this, sptr_to_self](TVMArgs args, TVMRetValue* rv) {
         GetChat()->ProcessSystemPrompts();
+      });
+    } else if (name == "apply_lora") {
+      return PackedFunc([this, sptr_to_self](TVMArgs args, TVMRetValue* rv) {
+        ICHECK_EQ(args.size(), 1);
+        Map<String, NDArray> lora_weight = args[0];
+        GetChat()->ApplyLora(lora_weight);
       });
     } else {
       return PackedFunc(nullptr);
