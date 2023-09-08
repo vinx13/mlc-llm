@@ -58,7 +58,6 @@ class LlamaConfig:
 
 
 class Linear(nn.Module):
-    lora_r: tir.Var = tir.Var("r", "int64")
 
     def __init__(
         self,
@@ -68,7 +67,7 @@ class Linear(nn.Module):
         bias=True,
         *,
         f_lora_init: Callable[["Linear"], None] = None,
-        f_lora_forward: Callable[["Linear"], relax.Expr] = None,
+        f_lora_forward: Callable[["Linear", relax.Expr], relax.Expr] = None,
     ):
         self.in_features = in_features
         self.out_features = out_features
@@ -78,16 +77,17 @@ class Linear(nn.Module):
             self.bias = nn.Parameter((out_features,), dtype=dtype, name="linear_bias")
         else:
             self.bias = None
+        lora_r: tir.Var = tir.Var("r", "int64")
         if f_lora_init is None:
             setattr(
                 self,
                 "lora_A.weight",
-                nn.Parameter((Linear.lora_r, in_features), dtype=dtype, name="lora_weight"),
+                nn.Parameter((lora_r, in_features), dtype=dtype, name="lora_weight"),
             )
             setattr(
                 self,
                 "lora_B.weight",
-                nn.Parameter((out_features, Linear.lora_r), dtype=dtype, name="lora_weight"),
+                nn.Parameter((out_features, lora_r), dtype=dtype, name="lora_weight"),
             )
         else:
             f_lora_init(self)
@@ -99,9 +99,13 @@ class Linear(nn.Module):
             lora_weight = nn.emit(
                 relax.op.matmul(getattr(self, "lora_B.weight"), getattr(self, "lora_A.weight"))
             )
-            updated_weight = nn.emit(relax.op.add(self.weight, lora_weight))
+            linear1 = nn.emit(relax.op.linear(input, self.weight))
+            linear2 = nn.emit(relax.op.linear(input, lora_weight))
+            return nn.emit(relax.op.add(linear1, linear2))
         else:
-            updated_weight = self.f_lora_forward(self)
+            linear1 = nn.emit(relax.op.linear(input, self.weight))
+            linear2 = self.f_lora_forward(self, input)
+            return nn.emit(relax.op.add(linear1, linear2))
         return nn.emit(relax.op.linear(input, updated_weight, self.bias))
 
 
@@ -178,33 +182,34 @@ class LlamaMLP(nn.Module):
         self.combine_matmul = config.combine_matmul
         if self.combine_matmul:
 
+            lora_r = tir.Var("r", "int64")
             def lora_init(_: Linear):
                 setattr(
                     self,
                     "gate_proj.lora_A.weight",
-                    nn.Parameter((Linear.lora_r, hidden_size), dtype=dtype, name="lora_weight"),
+                    nn.Parameter((lora_r, hidden_size), dtype=dtype, name="lora_weight"),
                 )
                 setattr(
                     self,
                     "gate_proj.lora_B.weight",
                     nn.Parameter(
-                        (intermediate_size, Linear.lora_r), dtype=dtype, name="lora_weight"
+                        (intermediate_size, lora_r), dtype=dtype, name="lora_weight"
                     ),
                 )
                 setattr(
                     self,
                     "up_proj.lora_A.weight",
-                    nn.Parameter((Linear.lora_r, hidden_size), dtype=dtype, name="lora_weight"),
+                    nn.Parameter((lora_r, hidden_size), dtype=dtype, name="lora_weight"),
                 )
                 setattr(
                     self,
                     "up_proj.lora_B.weight",
                     nn.Parameter(
-                        (intermediate_size, Linear.lora_r), dtype=dtype, name="lora_weight"
+                        (intermediate_size, lora_r), dtype=dtype, name="lora_weight"
                     ),
                 )
 
-            def lora_forward(linear: Linear):
+            def lora_forward(linear: Linear, input: relax.Expr):
                 lora_weights = [
                     nn.emit(
                         relax.op.matmul(
@@ -215,8 +220,7 @@ class LlamaMLP(nn.Module):
                     for name in ["gate_proj", "up_proj"]
                 ]
                 lora_weight = nn.emit(relax.op.concat(lora_weights, axis=0))
-                updated_weight = nn.emit(relax.op.add(linear.weight, lora_weight))
-                return updated_weight
+                return nn.emit(relax.op.linear(input, lora_weight))
 
             self.gate_up_proj = Linear(
                 hidden_size,
@@ -290,19 +294,20 @@ class LlamaAttention(nn.Module):
         self.combine_matmul = config.combine_matmul
         if self.combine_matmul:
 
+            lora_r = tir.Var("r", "int64")
             def lora_init(_: Linear):
                 setattr(
                     self,
                     "q_proj.lora_A.weight",
                     nn.Parameter(
-                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                        (lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
                     ),
                 )
                 setattr(
                     self,
                     "q_proj.lora_B.weight",
                     nn.Parameter(
-                        (self.num_query_heads * self.head_dim, Linear.lora_r),
+                        (self.num_query_heads * self.head_dim, lora_r),
                         dtype=dtype,
                         name="lora_weight",
                     ),
@@ -311,14 +316,14 @@ class LlamaAttention(nn.Module):
                     self,
                     "k_proj.lora_A.weight",
                     nn.Parameter(
-                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                        (lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
                     ),
                 )
                 setattr(
                     self,
                     "k_proj.lora_B.weight",
                     nn.Parameter(
-                        (self.num_key_value_heads * self.head_dim, Linear.lora_r),
+                        (self.num_key_value_heads * self.head_dim, lora_r),
                         dtype=dtype,
                         name="lora_weight",
                     ),
@@ -327,20 +332,20 @@ class LlamaAttention(nn.Module):
                     self,
                     "v_proj.lora_A.weight",
                     nn.Parameter(
-                        (Linear.lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
+                        (lora_r, self.hidden_size), dtype=dtype, name="lora_weight"
                     ),
                 )
                 setattr(
                     self,
                     "v_proj.lora_B.weight",
                     nn.Parameter(
-                        (self.num_key_value_heads * self.head_dim, Linear.lora_r),
+                        (self.num_key_value_heads * self.head_dim, lora_r),
                         dtype=dtype,
                         name="lora_weight",
                     ),
                 )
 
-            def lora_forward(linear: Linear):
+            def lora_forward(linear: Linear, input: relax.Expr):
                 lora_weights = [
                     nn.emit(
                         relax.op.matmul(
@@ -351,8 +356,7 @@ class LlamaAttention(nn.Module):
                     for name in ["q_proj", "k_proj", "v_proj"]
                 ]
                 lora_weight = nn.emit(relax.op.concat(lora_weights, axis=0))
-                updated_weight = nn.emit(relax.op.add(linear.weight, lora_weight))
-                return updated_weight
+                return nn.emit(relax.op.linear(input, lora_weight))
 
             self.query_key_value_proj = Linear(
                 self.hidden_size,
