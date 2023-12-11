@@ -740,11 +740,11 @@ def build(mod_deploy: tvm.IRModule, args: argparse.Namespace) -> None:
                 dl.gpu.GeneralReduction(),
                 dl.gpu.Fallback(),
             )(mod_deploy)
-            mod_deploy = (
-                mlc_llm.transform.LiftTIRGlobalBufferAlloc()(  # pylint: disable=not-callable
-                    mod_deploy
-                )
-            )
+            # mod_deploy = (
+            #     mlc_llm.transform.LiftTIRGlobalBufferAlloc()(  # pylint: disable=not-callable
+            #         mod_deploy
+            #     )
+            # )
         if not args.enable_batching:
             mod_deploy = tvm.tir.transform.ForceNarrowIndexToInt32()(mod_deploy)
 
