@@ -30,9 +30,11 @@ def main(argv):
 
     parser = ArgumentParser("MLC AutoLLM Quantization Framework")
     parser.add_argument(
-        "config",
+        "--model",
         type=detect_config,
-        help=HELP["config"] + " (required)",
+        required=True,
+        dest="config",
+        help=HELP["model"] + " (required)",
     )
     parser.add_argument(
         "--quantization",

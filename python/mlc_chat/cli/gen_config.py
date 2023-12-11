@@ -19,9 +19,11 @@ def main(argv):
         return path
 
     parser.add_argument(
-        "config",
+        "--model",
         type=detect_config,
-        help=HELP["config"] + " (required)",
+        required=True,
+        dest="config",
+        help=HELP["model"] + " (required)",
     )
     parser.add_argument(
         "--quantization",
@@ -63,12 +65,6 @@ def main(argv):
         help=HELP["prefill_chunk_size"] + ' (default: "%(default)s")',
     )
     parser.add_argument(
-        "--tensor-parallel-shards",
-        type=int,
-        default=None,
-        help=HELP["tensor_parallel_shards"] + ' (default: "%(default)s")',
-    )
-    parser.add_argument(
         "--output",
         "-o",
         type=_parse_output,
@@ -85,6 +81,5 @@ def main(argv):
         context_window_size=parsed.context_window_size,
         sliding_window=parsed.sliding_window,
         prefill_chunk_size=parsed.prefill_chunk_size,
-        tensor_parallel_shards=parsed.tensor_parallel_shards,
         output=parsed.output,
     )

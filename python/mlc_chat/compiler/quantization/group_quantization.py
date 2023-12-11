@@ -10,7 +10,6 @@ from tvm.runtime import NDArray
 from tvm.target import Target
 
 from ...support import logging
-from .. import tensor_parallel as tp
 from ..loader import QuantizeMapping
 from .utils import convert_uint_to_float
 
@@ -289,13 +288,13 @@ class GroupQuantizeLinear(nn.Module):
             self.bias = None
 
     @staticmethod
-    def from_linear(src: nn.Linear, config: GroupQuantize) -> "GroupQuantizeLinear":
+    def from_linear(linear: nn.Linear, config: GroupQuantize) -> "GroupQuantizeLinear":
         """
         Converts a non-quantized nn.Linear to a group quantized GroupQuantizeLinear
 
         Parameters
         ----------
-        src : nn.Linear
+        linear : nn.Linear
             The non-quantized nn.Linear.
 
         config : GroupQuantize
@@ -306,20 +305,13 @@ class GroupQuantizeLinear(nn.Module):
         ret : GroupQuantizeLinear
             The group quantized GroupQuantizeLinear layer.
         """
-        quantized_linear = GroupQuantizeLinear(
-            in_features=src.in_features,
-            out_features=src.out_features,
+        return GroupQuantizeLinear(
+            in_features=linear.in_features,
+            out_features=linear.out_features,
             config=config,
-            bias=getattr(src, "bias", None) is not None,
-            out_dtype=src.out_dtype,
+            bias=getattr(linear, "bias", None) is not None,
+            out_dtype=linear.out_dtype,
         )
-        if quantized_linear.bias is not None:
-            quantized_linear.bias.attrs = src.bias.attrs
-        if "shard_strategy" in src.weight.attrs:
-            shard = src.weight.attrs["shard_strategy"]
-            _apply_sharding(shard, f"{shard.name}_q_weight", quantized_linear.q_weight)
-            _apply_sharding(shard, f"{shard.name}_q_scale", quantized_linear.q_scale)
-        return quantized_linear
 
     def forward(self, x: nn.Tensor) -> nn.Tensor:  # pylint: disable=invalid-name
         """
@@ -414,30 +406,3 @@ class GroupQuantizeEmbedding(nn.Module):
             nn.op.take(w, nn.op.reshape(x, shape=[-1]), axis=0),
             shape=[*x.shape, self.dim],
         )
-
-
-def _apply_sharding(shard, name: str, weight: nn.Parameter):
-    assert weight.ndim == 2
-    if isinstance(shard, tp.Row):
-        assert weight.shape[0] == shard.row
-        weight.attrs["shard_strategy"] = tp.Row(
-            name=name,
-            row=weight.shape[0],
-            col=weight.shape[1],
-        )
-    elif isinstance(shard, tp.RowSeg):
-        assert weight.shape[0] == sum(shard.rows)
-        weight.attrs["shard_strategy"] = tp.RowSeg(
-            name=name,
-            rows=shard.rows,
-            col=weight.shape[1],
-            groups=shard.groups,
-        )
-    elif isinstance(shard, tp.Col):
-        weight.attrs["shard_strategy"] = tp.Col(
-            name=name,
-            row=weight.shape[0],
-            col=weight.shape[1],
-        )
-    else:
-        raise NotImplementedError(f"Unknowing sharding strategy: {shard}")
