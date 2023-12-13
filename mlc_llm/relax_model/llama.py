@@ -1544,6 +1544,14 @@ def setup_params(mod, param_manager, dtype, config, args):
         func = tvm.get_global_func("cutlass.symmetric_quantize")
         nd_experts = tvm.nd.array(experts)
         qweight, qscale = func(nd_experts, True)
+        if args.num_shards == 1:
+            func = tvm.get_global_func("cutlass.ft_preprocess_weight")
+            from ..core import get_cuda_sm_version
+            arch = get_cuda_sm_version()
+            if arch >= 90:
+                arch = 80
+            qweight = func(qweight, arch, True)
+
         if relax_pname.endswith("weight"):
             return qweight
         else:
