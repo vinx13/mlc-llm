@@ -46,9 +46,8 @@ def apply_rotary_pos_emb(q, k, positions, position_embedding_base):
 
 
 class LlamaAttentionBatched(LlamaAttentionBase):
-    def __init__(self, config: LlamaConfig, head_mapping: relax.Constant):
+    def __init__(self, config: LlamaConfig):
         super().__init__(config)
-        self.head_mapping = head_mapping  # (num_heads,), used by vLLM for multi-query attention
         self.sliding_window = None
 
         if config.sliding_window:
@@ -178,9 +177,9 @@ class LlamaAttentionBatched(LlamaAttentionBase):
 
 
 class LlamaDecoderLayerBatched(LlamaDecoderLayer):
-    def __init__(self, config: LlamaConfig, head_mapping: relax.Constant):
+    def __init__(self, config: LlamaConfig):
         super().__init__(config, False)
-        self.self_attn = LlamaAttentionBatched(config, head_mapping)
+        self.self_attn = LlamaAttentionBatched(config)
 
     def forward(
         self,
@@ -230,20 +229,12 @@ class LlamaModel(nn.Module):
         num_query_heads = config.num_attention_heads // config.num_shards
         num_key_value_heads = config.get_num_key_value_heads() // config.num_shards
         num_queries_per_kv = num_query_heads // num_key_value_heads
-        head_mapping = relax.const(
-            tvm.nd.array(
-                np.repeat(np.arange(num_key_value_heads, dtype="int32"), num_queries_per_kv)
-            )
-        )
 
         if not sep_embed:
             self.embed_tokens = Embedding(vocab_size_var, config.hidden_size, dtype=config.dtype)
 
         self.layers = ModuleList(
-            [
-                LlamaDecoderLayerBatched(config, head_mapping)
-                for _ in range(config.num_hidden_layers)
-            ]
+            [LlamaDecoderLayerBatched(config) for _ in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, dtype=config.dtype, eps=config.rms_norm_eps)
 
