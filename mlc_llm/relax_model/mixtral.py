@@ -384,55 +384,41 @@ class MoE(nn.Module):
             )
         )
 
-    # def get_indptr(self, cumsum_colwise_flattened: relax.Expr) -> relax.Expr:
-    #     from tvm import relax
-    #     from tvm.script import tir as T
-
-    #     @T.prim_func
-    #     def get_expert_instance_indptr(
-    #         var_cumsum_colwise_flattened: T.handle,
-    #         var_expert_instance_indptr: T.handle,
-    #         batch_size: T.int32,
-    #     ):
-    #         cumsum_colwise_flattened = T.match_buffer(
-    #             var_cumsum_colwise_flattened, shape=[batch_size * self.num_experts], dtype="int32"
-    #         )
-    #         expert_instance_indptr = T.match_buffer(
-    #             var_expert_instance_indptr, shape=[self.num_experts], dtype="int64"
-    #         )
-
-    #         for expert_id in T.serial(0, self.num_experts):
-    #             with T.block("indptr"):
-    #                 vexpert_id = T.axis.spatial(self.num_experts, expert_id)
-    #                 expert_instance_indptr[vexpert_id] = cumsum_colwise_flattened[
-    #                     vexpert_id * batch_size - 1
-    #                 ]
-
-    #     bb = relax.BlockBuilder.current()
-    #     gvar = bb.add_func(get_expert_instance_indptr, "get_expert_instance_indptr")
-    #     return bb.emit(
-    #         relax.call_tir(
-    #             gvar,
-    #             [cumsum_colwise_flattened],
-    #             out_sinfo=relax.TensorStructInfo([self.num_experts], "int64"),
-    #             tir_vars=[cumsum_colwise_flattened.struct_info.shape[0] // self.num_experts],
-    #         )
-    #     )
     def get_indptr(self, cumsum_colwise_flattened: relax.Expr) -> relax.Expr:
-        indptr = nn.emit(
-            relax.op.strided_slice(
-                cumsum_colwise_flattened,
-                axes=[0],
-                begin=[
-                    cumsum_colwise_flattened.struct_info.shape[0] // self.num_experts
-                    - 1
-                ],
-                end=[cumsum_colwise_flattened.struct_info.shape[0]],
-                strides=[self.num_experts],
-                assume_inbound=True,
+        from tvm import relax
+        from tvm.script import tir as T
+
+        @T.prim_func
+        def get_expert_instance_indptr(
+            var_cumsum_colwise_flattened: T.handle,
+            var_expert_instance_indptr: T.handle,
+            batch_size: T.int32,
+        ):
+            cumsum_colwise_flattened = T.match_buffer(
+                var_cumsum_colwise_flattened, shape=[batch_size * self.num_experts], dtype="int32"
+            )
+            expert_instance_indptr = T.match_buffer(
+                var_expert_instance_indptr, shape=[self.num_experts], dtype="int64"
+            )
+
+            for expert_id in T.serial(0, self.num_experts):
+                with T.block("indptr"):
+                    vexpert_id = T.axis.spatial(self.num_experts, expert_id)
+                    expert_instance_indptr[vexpert_id] = cumsum_colwise_flattened[
+                        vexpert_id * batch_size - 1
+                    ]
+
+        bb = relax.BlockBuilder.current()
+        gvar = bb.add_func(get_expert_instance_indptr, "get_expert_instance_indptr")
+        return bb.emit(
+            relax.call_tir(
+                gvar,
+                [cumsum_colwise_flattened],
+                out_sinfo=relax.TensorStructInfo([self.num_experts], "int64"),
+                tir_vars=[cumsum_colwise_flattened.struct_info.shape[0] // self.num_experts],
             )
         )
-        return nn.emit(relax.op.astype(indptr, "int64"))
+
 
     def forward(self, hidden_states):
         hidden_states_shape = hidden_states.struct_info.shape
