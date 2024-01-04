@@ -53,6 +53,9 @@ class LlamaAttentionBatched(LlamaAttentionBase):
 
         if config.sliding_window:
             self.sliding_window = T.IntImm("int32", config.sliding_window)
+        max_context_length = config.sliding_window or config.max_sequence_length
+        partition_size = 512  # partition_size in vLLM attention
+        self.max_num_partitions = (max_context_length + partition_size - 1) // partition_size
 
     def forward(
         self,
@@ -124,6 +127,29 @@ class LlamaAttentionBatched(LlamaAttentionBase):
             )
         else:
             # Decode, using vLLM kernel
+            exp_sums = nn.emit(
+                relax.op.builtin.alloc_tensor(
+                    relax.ShapeExpr((num_tokens, self.num_query_heads, self.max_num_partitions)),
+                    dtype="float32",
+                    runtime_device_index=0,
+                )
+            )
+            max_logits = nn.emit(
+                relax.op.builtin.alloc_tensor(
+                    relax.ShapeExpr((num_tokens, self.num_query_heads, self.max_num_partitions)),
+                    dtype="float32",
+                    runtime_device_index=0,
+                )
+            )
+            tmp_out = nn.emit(
+                relax.op.builtin.alloc_tensor(
+                    relax.ShapeExpr(
+                        (num_tokens, self.num_query_heads, self.max_num_partitions, self.head_dim)
+                    ),
+                    dtype=queries.struct_info.dtype,
+                    runtime_device_index=0,
+                )
+            )
             attn_output = nn.emit(
                 relax.op.call_dps_packed(
                     "tvm.contrib.vllm.single_query_cached_kv_attention",
@@ -131,11 +157,13 @@ class LlamaAttentionBatched(LlamaAttentionBase):
                         queries,
                         k_cache,
                         v_cache,
-                        self.head_mapping,
                         block_tables,
                         seq_lens,
                         16,  # block_size
                         max_seqlen,
+                        exp_sums,
+                        max_logits,
+                        tmp_out,
                     ],
                     out_sinfo=queries.struct_info,
                 )
