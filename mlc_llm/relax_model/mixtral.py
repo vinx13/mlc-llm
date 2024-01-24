@@ -5,6 +5,7 @@ from tvm.script import relax as R, tir as T
 from tvm import relax
 from tvm.relax.frontend.nn import Tensor
 from .llama import MixtralConfig, Linear
+import functools
 
 
 class MoELinear(nn.Module):
@@ -365,6 +366,20 @@ class MoE(nn.Module):
             )
         )
 
+    def moe_sum(self, tokens):
+        assert len(tokens.struct_info.shape) == 3
+
+        def unrolled_sum(x):
+            return tvm.te.compute(
+                (x.shape[0], x.shape[2]),
+                lambda i, j: functools.reduce(
+                    tir.Add, [x[i, k, j] for k in range(self.num_experts_per_tok)]
+                ),
+                name="unrolled_sum",
+            )
+
+        return nn.emit_te(unrolled_sum, tokens)
+
     def forward(self, hidden_states):
         hidden_states_shape = hidden_states.struct_info.shape
         hidden_size = hidden_states_shape[-1]
@@ -403,7 +418,7 @@ class MoE(nn.Module):
         expert_weights = nn.emit(
             relax.op.reshape(expert_weights, (-1, self.num_experts_per_tok, 1))
         )
-        weighted_sum = nn.emit(relax.op.sum(unflattened * expert_weights, axis=1))
+        weighted_sum = self.moe_sum(nn.emit(unflattened * expert_weights))
 
         # reshape back to 3D
         weighted_sum = nn.emit(relax.op.reshape(weighted_sum, hidden_states_shape))
