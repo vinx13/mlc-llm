@@ -28,7 +28,7 @@ class ExternModuleStore:
     target: Optional[Target] = None
     flashinfer: bool = False
     faster_transformer: bool = False
-    cutlass_group_gemm: bool = False
+    cutlass_group_gemm: bool = True
 
 
 STORE: ExternModuleStore = ExternModuleStore()

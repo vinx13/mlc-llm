@@ -52,6 +52,7 @@ class _MemoryEstimator(PyExprVisitor):
                 self.planned_mem_num = 0
                 self.visit_expr(func)
                 result[global_var.name_hint] = self.planned_alloc_mem
+                logger.info(str(func))
                 logger.info(
                     "[Memory usage] Function `%s`: %.2f MB",
                     global_var.name_hint,

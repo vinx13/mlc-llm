@@ -107,6 +107,7 @@ def _mlc_llm_pipeline(  # pylint: disable=too-many-arguments
                 FuseFTDequantizeEpilogue(),
                 FuseDequantizeTranspose(),
                 CublasDispatch() if cublas_gemm else tvm.transform.Sequential([]),
+                _DebugDump("debug-phase0.5-after-cublas", debug_dump, show_meta=False),
                 FuseAddRMSNorm(target=target),
                 FuseTransposeMatmul(),
                 _DebugDump("debug-phase1.py", debug_dump, show_meta=False),
@@ -116,7 +117,9 @@ def _mlc_llm_pipeline(  # pylint: disable=too-many-arguments
                 tvm.relax.transform.LegalizeOps(),
                 tvm.relax.transform.AnnotateTIROpPattern(),
                 tvm.relax.transform.FoldConstant(),
+                _DebugDump("debug-phase1.8.py", debug_dump, show_meta=False),
                 tvm.relax.transform.FuseOps(),
+                _DebugDump("debug-phase1.9.py", debug_dump, show_meta=False),
                 tvm.relax.transform.FuseTIR(),
                 _DebugDump("debug-phase2.py", debug_dump, show_meta=False),
                 # Phase 3. Passes on TIR

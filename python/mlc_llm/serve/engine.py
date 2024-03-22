@@ -162,6 +162,7 @@ def _estimate_max_total_sequence_length(  # pylint: disable=too-many-locals
             "--mlc-chat-config",
             config_file_path,
         ]
+        print(' '.join(cmd))
         usage_str = subprocess.check_output(cmd, universal_newlines=True)
         usage_json = json.loads(usage_str)
         params_bytes += usage_json["params_bytes"]
@@ -213,6 +214,13 @@ def _estimate_max_total_sequence_length(  # pylint: disable=too-many-locals
                 "Cannot read total GPU global memory from device. "
                 'Please the GPU memory size in bytes through "MLC_GPU_SIZE_BYTES" env variable.'
             )
+
+    print('gpu_size_bytes:', gpu_size_bytes)
+    print('params_bytes:', params_bytes)
+    print('temp_func_bytes:', temp_func_bytes)
+    print('kv_aux_workspace_bytes:', kv_aux_workspace_bytes)
+    print('model_workspace_bytes:', model_workspace_bytes)
+    print('logit_processor_workspace_bytes:', logit_processor_workspace_bytes)
 
     max_total_sequence_length = int(
         (
