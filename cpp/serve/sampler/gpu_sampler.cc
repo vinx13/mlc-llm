@@ -43,6 +43,7 @@ class GPUSampler : public SamplerObj {
         gpu_argsort_probs_func_(ft->gpu_argsort_probs_func_),
         gpu_sample_with_top_p_func_(ft->gpu_sample_with_top_p_func_),
         gpu_sampler_take_probs_func_(ft->gpu_sampler_take_probs_func_),
+        gpu_sampler_renormalize_top_p_probs_func_(ft->gpu_sampler_renormalize_top_p_probs_func_),
         trace_recorder_(std::move(trace_recorder)) {
     ICHECK(gpu_multinomial_from_uniform_func_.defined());
     ICHECK(gpu_argsort_probs_func_.defined());
@@ -251,6 +252,31 @@ class GPUSampler : public SamplerObj {
   }
 
   /*! \brief Sample tokens on GPU. Take out the probability values when needed. */
+  std::vector<NDArray> SampleOnGPUWithTopPRenormalizedProb(
+      NDArray probs_on_device, NDArray uniform_samples_device,
+      NDArray sample_indices_device,  //
+      bool need_prob_values, int num_probs, const std::vector<int>& top_prob_offset_indptr) {
+    NDArray sampled_token_ids_device{nullptr};
+    NDArray sampled_probs_device{nullptr};
+    NDArray top_prob_probs_device{nullptr};
+    NDArray top_prob_indices_device{nullptr};
+
+    if (!need_prob_values) {
+      // - Short path: If top_p and prob values are not needed, we directly sample from multinomial.
+      SyncCopyStream(device_, compute_stream_, copy_stream_);
+      sampled_token_ids_device = gpu_multinomial_from_uniform_func_(
+          probs_on_device, uniform_samples_device, sample_indices_device);
+      return {sampled_token_ids_device, sampled_probs_device, top_prob_probs_device,
+              top_prob_indices_device};
+    }
+
+    // TODO:
+    // NOTE: should avoid sorting agian by passing the sorted probs
+    LOG(FATAL) << "Not implemented yet";
+    throw;
+  }
+
+  /*! \brief Sample tokens on GPU. Take out the probability values when needed. */
   std::vector<NDArray> SampleOnGPU(NDArray probs_on_device, NDArray uniform_samples_device,
                                    NDArray sample_indices_device,  //
                                    bool need_top_p, bool need_prob_values, int num_probs,
@@ -317,6 +343,33 @@ class GPUSampler : public SamplerObj {
             top_prob_indices_device};
   }
 
+  /*!
+   * \brief Renormalize the top-p probabilities for each token
+   */
+  void RenormalizeTopPProbs(NDArray probs_on_device, const std::vector<int> cum_seq_lengths,
+                            const Array<String>& request_ids,
+                            const Array<GenerationConfig>& generation_cfg) {
+    int num_sequences = cum_seq_lengths.size() - 1;
+    ICHECK_EQ(request_ids.size(), num_sequences);
+    bool need_top_p = false;
+    Array<NDArray> argsort_results = gpu_argsort_probs_func_(probs_on_device);
+    ICHECK(argsort_results.size() == 2);
+    NDArray sorted_probs = argsort_results[0];
+    NDArray top_p_host = top_p_host.CreateView(
+        {probs_on_device->shape[0]}, top_p_host->dtype);  // This may exceed top_p_host_ size.
+    // idealy renormalize_top_p_probs_func should accept top_p_device and top_p_offsets_device so
+    // that we don't need to duplicate top p value for tokens in the same request
+    float* p_top_p_host = static_cast<float*>(top_p_host->data);
+    for (int i = 0; i < num_sequences; i++) {
+      int start = cum_seq_lengths[i];
+      int end = cum_seq_lengths[i + 1];
+      std::fill_n(p_top_p_host, end - start, generation_cfg[i]->top_p);
+    }
+    CopyArray(/*src=*/top_p_host, /*dst=*/top_p_device_, copy_stream_);
+    SyncCopyStream(device_, compute_stream_, copy_stream_);
+    gpu_sampler_renormalize_top_p_probs_func_(probs_on_device, sorted_probs, top_p_device_);
+  }
+
   /*! \brief Copy the results of GPU sampling functions back to CPU. */
   std::vector<NDArray> CopyArraysToCPU(const std::vector<NDArray>& device_arrays,  //
                                        int num_samples, bool need_prob_values, int num_top_probs) {
@@ -370,6 +423,7 @@ class GPUSampler : public SamplerObj {
   PackedFunc gpu_argsort_probs_func_;
   PackedFunc gpu_sample_with_top_p_func_;
   PackedFunc gpu_sampler_take_probs_func_;
+  PackedFunc gpu_sampler_renormalize_top_p_probs_func_;
   // Auxiliary NDArrays on CPU
   NDArray uniform_samples_host_;
   NDArray sample_indices_host_;

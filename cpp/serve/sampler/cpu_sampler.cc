@@ -80,6 +80,7 @@ TokenProbPair SampleTopPFromProb(NDArray prob, int unit_offset, int input_prob_o
       }
     }
     if (output_prob_dist) {
+      // Only top_p == 0 is handled. Otherwise returns the probability distribution before top-p renormalization.
       float* __restrict p_output_prob =
           static_cast<float*>(__builtin_assume_aligned((*output_prob_dist)[unit_offset]->data, 4));
       for (int i = 0; i < ndata; ++i) {

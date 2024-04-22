@@ -46,6 +46,7 @@ class AttachGPUSamplingFunc:  # pylint: disable=too-few-public-methods
                 _attach_argsort_func(bb, vocab_size),
                 _attach_sample_with_top_p(bb, vocab_size),
                 _attach_take_probs_func(bb, vocab_size),
+                _attach_renormalize_by_top_p(bb, vocab_size),
             ]
         ]
 
@@ -218,6 +219,22 @@ def _attach_sample_with_top_p(  # pylint: disable=too-many-locals
             )
             bb.emit_output(result)
         gv = bb.emit_func_output(result)
+    return gv
+
+
+def _attach_renormalize_by_top_p(bb: relax.BlockBuilder, vocab_size: tir.PrimExpr):
+    batch_size = tir.Var("batch_size", "int64")
+    prob = relax.Var("prob", relax.TensorStructInfo((batch_size, vocab_size), "float32"))
+    sorted_prob = relax.Var("sorted_prob", relax.TensorStructInfo((batch_size, vocab_size), "float32"))
+    top_p = relax.Var("top_p", relax.TensorStructInfo((batch_size, 1), "float32"))
+    # top_k = relax.Var("top_k", relax.TensorStructInfo((batch_size, 1), "int32"))  # do we need top_k?
+    args = [prob, sorted_prob, top_p, top_k]
+    with bb.function("sampler_renormalize_by_top_p", args):
+        with bb.dataflow():
+            top_k = nn.ones((batch_size, 1), "int32")
+            renormalized_prob = nn.renormalize_top_p_top_k_prob(prob, sorted_prob, top_p, top_k)
+            bb.emit_output(renormalized_prob)
+        gv = bb.emit_func_output(renormalized_prob)
     return gv
 
 
