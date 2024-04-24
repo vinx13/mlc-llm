@@ -93,7 +93,9 @@ class BatchVerifyActionObj : public EngineActionObj {
     draft_probs_on_device = draft_probs_on_device.CreateView(
         {static_cast<int64_t>(draft_token_slots_.size()), draft_probs_on_device->shape[1]},
         draft_probs_on_device->dtype);
-    draft_token_manager_->GatherProbs(draft_token_slots_, &draft_probs_on_device);
+    models_[draft_model_id_]->GatherDraftProbs(
+        model_workspaces_[draft_model_id_].draft_probs_storage, draft_token_slots_,
+        draft_probs_on_device);
 
     RECORD_EVENT(trace_recorder_, request_ids, "start verify embedding");
     ObjectRef embeddings = models_[verify_model_id_]->TokenEmbed(

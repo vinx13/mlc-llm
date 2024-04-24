@@ -20,8 +20,10 @@ DraftTokenWorkspaceManagerObj::DraftTokenWorkspaceManagerObj(int max_num_tokens,
       scatter_probs_func_(ft.scatter_probs_func_),
       max_num_tokens_(max_num_tokens),
       vocab_size_(vocab_size),
+      hidden_states_dtype_(hidden_states_dtype),
       hidden_size_(hidden_size),
-      device_(device) {
+      device_(device),
+      ft_(ft) {
   probs_device_ = NDArray::Empty({max_num_tokens, vocab_size}, DataType::Float(32), device);
   hidden_states_device_ =
       NDArray::Empty({max_num_tokens, hidden_size}, hidden_states_dtype, device);
@@ -39,40 +41,44 @@ void DraftTokenWorkspaceManagerObj::AllocateSlots(int num_slots, std::vector<int
   free_slots_.resize(free_slots_.size() - num_slots);
 }
 
-void DraftTokenWorkspaceManagerObj::CopyInProbs(const NDArray& probs,
-                                                const std::vector<int>& slots) {
-  ICHECK_EQ(probs->shape[0], slots.size());
-  NDArray slots_device =
-      slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
-  slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
-  scatter_probs_func_(probs, slots_device, probs_device_);
-}
+// void DraftTokenWorkspaceManagerObj::CopyInProbs(const NDArray& probs,
+//                                                 const std::vector<int>& slots) {
+//   ICHECK_EQ(probs->shape[0], slots.size());
+//   NDArray slots_device =
+//       slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
+//   slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
+//   scatter_probs_func_(probs, slots_device, probs_device_);
+// }
 
-void DraftTokenWorkspaceManagerObj::CopyInHiddenStates(const NDArray& hidden_states,
-                                                       const std::vector<int>& slots) {
-  ICHECK_EQ(hidden_states->shape[0], slots.size());
-  NDArray slots_device =
-      slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
-  slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
-  scatter_hidden_states_func_(hidden_states, slots_device, hidden_states_device_);
-}
+// void DraftTokenWorkspaceManagerObj::CopyInHiddenStates(const ObjectRef& hidden_states,
+//                                                        const std::vector<int>& slots) {
+//   // TODO
+//   // ICHECK_EQ(hidden_states->shape[0], slots.size());
+//   // NDArray slots_device =
+//   //     slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
+//   // slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
+//   // scatter_hidden_states_func_(hidden_states, slots_device, hidden_states_device_);
+// }
 
-void DraftTokenWorkspaceManagerObj::GatherProbs(const std::vector<int>& slots, NDArray* dst) {
-  ICHECK_EQ((*dst)->shape[0], slots.size());
-  NDArray slots_device =
-      slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
-  slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
-  gather_probs_func_(probs_device_, slots_device, *dst);
-}
+// void DraftTokenWorkspaceManagerObj::GatherProbs(const std::vector<int>& slots, NDArray* dst) {
+//   ICHECK_EQ((*dst)->shape[0], slots.size());
+//   NDArray slots_device =
+//       slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
+//   slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
+//   gather_probs_func_(probs_device_, slots_device, *dst);
+// }
 
-void DraftTokenWorkspaceManagerObj::GatherHiddenStates(const std::vector<int>& slots,
-                                                       NDArray* dst) {
-  ICHECK_EQ((*dst)->shape[0], slots.size());
-  NDArray slots_device =
-      slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
-  slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
-  gather_hidden_states_func_(hidden_states_device_, slots_device, *dst);
-}
+// void DraftTokenWorkspaceManagerObj::GatherHiddenStates(const std::vector<int>& slots,
+//                                                        ObjectRef* dst) {
+//   // ICHECK_EQ((*dst)->shape[0], slots.size());
+//   // NDArray slots_device =
+//   //     slots_device_.CreateView({static_cast<int64_t>(slots.size())}, DataType::Int(32));
+//   // slots_device.CopyFromBytes(slots.data(), slots.size() * sizeof(int));
+//   // gather_hidden_states_func_(hidden_states_device_, slots_device, *dst);
+//   // if ((*dst)->IsInstance<DRefObj>()) {
+//   //   // gather_hidden_states_func_(hidden_states_device_, slots_device, *dst);
+//   // }
+// }
 
 void DraftTokenWorkspaceManagerObj::FreeSlots(const std::vector<int>& slots) {
   std::copy(slots.begin(), slots.end(), std::back_inserter(free_slots_));
@@ -81,6 +87,10 @@ void DraftTokenWorkspaceManagerObj::FreeSlots(const std::vector<int>& slots) {
 void DraftTokenWorkspaceManagerObj::AllocWorkspace(ModelWorkspace* workspace) {
   workspace->draft_probs_on_device =
       NDArray::Empty({max_num_tokens_, vocab_size_}, DataType::Float(32), device_);
+  workspace->draft_probs_storage =
+      NDArray::Empty({max_num_tokens_, vocab_size_}, DataType::Float(32), device_);
+  workspace->hidden_states_storage =
+      ft_.Empty({max_num_tokens_, hidden_size_}, DataType(hidden_states_dtype_), device_);
 }
 
 }  // namespace serve

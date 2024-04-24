@@ -96,7 +96,9 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
     draft_probs_on_device = draft_probs_on_device.CreateView(
         {static_cast<int64_t>(draft_token_slots_.size()), draft_probs_on_device->shape[1]},
         draft_probs_on_device->dtype);
-    draft_token_manager_->GatherProbs(draft_token_slots_, &draft_probs_on_device);
+    models_[draft_model_id_]->GatherDraftProbs(
+        model_workspaces_[draft_model_id_].draft_probs_storage, draft_token_slots_,
+        draft_probs_on_device);
 
     std::vector<int> cum_verify_lengths = {0};
     cum_verify_lengths.reserve(num_rsentries + 1);
@@ -113,12 +115,10 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
     RECORD_EVENT(trace_recorder_, request_ids, "finish verify embedding");
 
     RECORD_EVENT(trace_recorder_, request_ids, "start verify");
-    ObjectRef fused_hidden_states = models_[verify_model_id_]->FuseEmbedHidden(
-        embeddings, NDArray(), 1, cum_verify_lengths[num_rsentries]);
-    NDArray hidden_states = models_[verify_model_id_]->BatchVerifyToLastHidden(
-        fused_hidden_states, request_internal_ids, verify_lengths);
-    ICHECK_EQ(hidden_states->ndim, 3);
-    ICHECK_EQ(hidden_states->shape[0], 1);
+    ObjectRef hidden_states = models_[verify_model_id_]->BatchVerifyToLastHidden(
+        embeddings, request_internal_ids, verify_lengths);
+    // ICHECK_EQ(hidden_states->ndim, 3);
+    // ICHECK_EQ(hidden_states->shape[0], 1);
     NDArray logits =
         models_[verify_model_id_]->GetLogits(hidden_states, 1, cum_verify_lengths[num_rsentries]);
     RECORD_EVENT(trace_recorder_, request_ids, "finish verify");
@@ -150,16 +150,19 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
     for (int i = 0; i < num_rsentries; ++i) {
       const std::vector<SampleResult>& sample_results = sample_results_arr[i];
       int accept_length = sample_results.size();
+      // LOG(INFO) << "Accepted length: " << accept_length;
       ICHECK_GE(accept_length, 1);
       for (SampleResult sample_result : sample_results) {
         rsentries[i]->mstates[verify_model_id_]->CommitToken(sample_result);
         rsentries[i]->mstates[draft_model_id_]->CommitToken(sample_result);
+        // LOG(INFO) << "Commit " << sample_result.sampled_token_id.first;
       }
       estate->stats.total_accepted_length += accept_length - 1;
       // - Minus one because the last draft token has no kv cache entry
       // - Take max with 0 in case of all accepted.
       int rollback_length =
           std::max(cum_verify_lengths[i + 1] - cum_verify_lengths[i] - accept_length, 0);
+      // LOG(INFO) << "rollback lenght: " << rollback_length;
       // rollback kv cache
       // NOTE: when number of small models is more than 1 (in the future),
       // it is possible to re-compute prefill for the small models.
@@ -174,21 +177,23 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       rsentries[i]->mstates[draft_model_id_]->RemoveAllDraftTokens(&draft_token_manager_);
       // - Slice hidden_states_for_sample
       last_accepted_hidden_positions.push_back(cum_verify_lengths[i] + accept_length - 1);
+      // LOG(INFO) << "last accepted pos: " << last_accepted_hidden_positions.back();
     }
-    NDArray hidden_states_for_draft =
-        Downcast<NDArray>(model_workspaces_[draft_model_id_].hidden_states)
-            .CreateView({num_rsentries, hidden_states->shape[2]}, hidden_states->dtype);
-    NDArray slots_device = draft_token_manager_->slots_device_.CreateView(
-        {num_rsentries}, draft_token_manager_->slots_device_->dtype);
-    slots_device.CopyFromBytes(last_accepted_hidden_positions.data(), sizeof(int) * num_rsentries);
-    NDArray hidden_states_2d =
-        hidden_states.CreateView({num_rsentries, hidden_states->shape[2]}, hidden_states->dtype);
+    // TODO
+    // NDArray hidden_states_for_draft =
+    //     Downcast<NDArray>(model_workspaces_[draft_model_id_].hidden_states)
+    //         .CreateView({num_rsentries, hidden_states->shape[2]}, hidden_states->dtype);
+    // NDArray hidden_states_2d =
+    //     hidden_states.CreateView({num_rsentries, hidden_states->shape[2]}, hidden_states->dtype);
 
-    draft_token_manager_->gather_hidden_states_func_(hidden_states_2d, slots_device,
-                                                     hidden_states_for_draft);
+    // models_[draft_model_id_]->BatchSelectLastHidden(hidden_states_2d,
+    // last_accepted_hidden_positions);
 
-    hidden_states_for_draft = hidden_states_for_draft.CreateView(
-        {num_rsentries, 1, hidden_states->shape[2]}, hidden_states->dtype);
+    // hidden_states_for_draft = hidden_states_for_draft.CreateView(
+    //     {num_rsentries, 1, hidden_states->shape[2]}, hidden_states->dtype);
+    // ObjectRef hidden_states_for_draft = model_workspaces_[draft_model_id_].hidden_states;
+    ObjectRef hidden_states_for_draft = models_[verify_model_id_]->BatchSelectLastHidden(hidden_states, last_accepted_hidden_positions);
+    // TODO gather
 
     {
       // One step draft for the following steps
@@ -202,6 +207,7 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       for (int i = 0; i < num_rsentries; ++i) {
         ICHECK(!mstates[i]->committed_tokens.empty());
         input_tokens.push_back(mstates[i]->committed_tokens.back().sampled_token_id.first);
+        // LOG(INFO) << "last committed token id " << input_tokens.back();
       }
 
       // - Compute embeddings.
@@ -214,15 +220,15 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       RECORD_EVENT(trace_recorder_, request_ids, "start proposal decode");
       ObjectRef fused_hidden_states = models_[draft_model_id_]->FuseEmbedHidden(
           embeddings, hidden_states_for_draft, /*batch_size*/ num_rsentries, /*seq_len*/ 1);
-      NDArray hidden_states_nd = models_[draft_model_id_]->BatchDecodeToLastHidden(
+      ObjectRef hidden_states = models_[draft_model_id_]->BatchDecodeToLastHidden(
           fused_hidden_states, request_internal_ids);
 
       if (models_[draft_model_id_]->CanGetLogits()) {
-        logits = models_[draft_model_id_]->GetLogits(hidden_states_nd, /*batch_size*/ num_rsentries,
+        logits = models_[draft_model_id_]->GetLogits(hidden_states, /*batch_size*/ num_rsentries,
                                                      /*seq_len*/ 1);
       } else {
         // - Use base model's head.
-        logits = models_[0]->GetLogits(hidden_states_nd, /*batch_size*/ num_rsentries,
+        logits = models_[0]->GetLogits(hidden_states, /*batch_size*/ num_rsentries,
                                        /*seq_len*/ 1);
       }
       RECORD_EVENT(trace_recorder_, request_ids, "finish proposal decode");
@@ -249,14 +255,11 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
           renormalized_probs, sample_indices, request_ids, generation_cfg, rngs, &prob_dist);
       ICHECK_EQ(sample_results.size(), num_rsentries);
       draft_token_manager_->AllocateSlots(num_rsentries, &draft_token_slots_);
-      draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
+      models_[draft_model_id_]->ScatterDraftProbs(renormalized_probs, draft_token_slots_,
+                                                  model_workspaces_[draft_model_id_].draft_probs_storage);
 
-      ICHECK_EQ(hidden_states_nd->ndim, 3);
-      draft_token_manager_->CopyInHiddenStates(
-          hidden_states_nd.CreateView(
-              {hidden_states_nd->shape[0] * hidden_states_nd->shape[1], hidden_states_nd->shape[2]},
-              hidden_states_nd->dtype),
-          draft_token_slots_);
+      models_[draft_model_id_]->ScatterHiddenStates(hidden_states, draft_token_slots_,
+                                                    model_workspaces_[draft_model_id_].hidden_states_storage);
 
       // - Add draft token to the state.
       for (int i = 0; i < num_rsentries; ++i) {

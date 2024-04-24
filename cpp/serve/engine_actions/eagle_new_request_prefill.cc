@@ -83,14 +83,15 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
     // - Get embedding and run prefill for each model.
     std::vector<int> prefill_lengths;
     prefill_lengths.resize(/*size=*/num_rsentries, /*value=*/-1);
-    NDArray hidden_states_for_input{nullptr};
-    NDArray hidden_states_for_sample{nullptr};
+    ObjectRef hidden_states_for_input{nullptr};
+    ObjectRef hidden_states_for_sample{nullptr};
     NDArray logits_for_sample{nullptr};
     // A map used to record the entry and child_idx pair needed to fork sequence.
     // The base model (id 0) should record all the pairs and all the small models
     // fork sequences according to this map.
     std::unordered_map<int, std::unordered_set<int>> fork_rsentry_child_map;
     for (int model_id = 0; model_id < static_cast<int>(models_.size()); ++model_id) {
+      LOG(INFO) << "EagleNewRequestPrefillActionObj Step model_id " << model_id;
       std::vector<int64_t> request_internal_ids;
       request_internal_ids.reserve(num_rsentries);
       ObjectRef embeddings = model_workspaces_[model_id].embeddings;
@@ -166,14 +167,17 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
       }
 
       RECORD_EVENT(trace_recorder_, request_ids, "start prefill");
-      ObjectRef fused_hidden_states = models_[model_id]->FuseEmbedHidden(
-          embeddings, hidden_states_for_input, /*batch_size*/ 1, /*seq_len*/ cum_prefill_length);
-      NDArray hidden_states = models_[model_id]->BatchPrefillToLastHidden(
-          fused_hidden_states, request_internal_ids, prefill_lengths);
+      ObjectRef embedding_or_hidden_states{nullptr};
+      if (model_id == 0) {
+        embedding_or_hidden_states = embeddings;
+      } else {
+        embedding_or_hidden_states = models_[model_id]->FuseEmbedHidden(
+            embeddings, hidden_states_for_input, /*batch_size*/ 1, /*seq_len*/ cum_prefill_length);
+      }
+      // hidden_states: (b * s, h)
+      ObjectRef hidden_states = models_[model_id]->BatchPrefillToLastHidden(
+          embedding_or_hidden_states, request_internal_ids, prefill_lengths);
       RECORD_EVENT(trace_recorder_, request_ids, "finish prefill");
-      ICHECK_EQ(hidden_states->ndim, 3);
-      ICHECK_EQ(hidden_states->shape[0], 1);
-      ICHECK_EQ(hidden_states->shape[1], cum_prefill_length);
 
       if (model_id == 0) {
         // We only need to sample for model 0 in prefill.
@@ -182,14 +186,24 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
 
       // Whether to use base model to get logits.
       int sample_model_id = !models_[model_id]->CanGetLogits() ? 0 : model_id;
-      hidden_states_for_sample = models_[sample_model_id]->BatchSelectLastHidden(
-          hidden_states, request_internal_ids, prefill_lengths);
+      std::vector<int> logit_positions;
+      logit_positions.reserve(prefill_lengths.size());
+      int total_len = 0;
+      for (int i = 0; i < prefill_lengths.size(); ++i) {
+        total_len += prefill_lengths[i];
+        logit_positions.push_back(total_len - 1);
+      }
+      // hidden_states_for_sample: (b * s, h)
+      hidden_states_for_sample =
+          models_[sample_model_id]->BatchSelectLastHidden(hidden_states, logit_positions);
+      // logits_for_sample: (b * s, v)
+      LOG(INFO) << "A";
       logits_for_sample =
           models_[sample_model_id]->GetLogits(hidden_states_for_sample, 1, num_rsentries);
-      ICHECK_EQ(hidden_states_for_sample->ndim, 3);
-      ICHECK_EQ(hidden_states_for_sample->shape[0], 1);
-      ICHECK_EQ(hidden_states_for_sample->shape[1], num_rsentries);
-
+      // ICHECK_EQ(hidden_states_for_sample->ndim, 2);
+      // ICHECK_EQ(hidden_states_for_sample->shape[0], 1);
+      // ICHECK_EQ(hidden_states_for_sample->shape[1], num_rsentries);
+      LOG(INFO) << "A";
       // - Update logits.
       ICHECK(logits_for_sample.defined());
       Array<GenerationConfig> generation_cfg;
@@ -200,11 +214,13 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         generation_cfg.push_back(prefill_inputs[i].rsentry->request->generation_cfg);
         mstates_for_logitproc.push_back(prefill_inputs[i].rsentry->mstates[sample_model_id]);
       }
+      LOG(INFO) << "A";
       logits_for_sample = logits_for_sample.CreateView({num_rsentries, logits_for_sample->shape[2]},
                                                        logits_for_sample->dtype);
       logit_processor_->InplaceUpdateLogits(logits_for_sample, generation_cfg,
                                             mstates_for_logitproc, request_ids);
 
+      LOG(INFO) << "A";
       // - Compute probability distributions.
       NDArray probs_on_device =
           logit_processor_->ComputeProbsFromLogits(logits_for_sample, generation_cfg, request_ids);
@@ -277,6 +293,7 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
           rsentry_activated.push_back(true);
         }
       }
+
       NDArray renormalized_probs = sampler_->BatchRenormalizeProbsByTopP(
           probs_on_device, sample_indices, request_ids, generation_cfg);
       std::vector<SampleResult> sample_results = sampler_->BatchSampleTokensWithProbAfterTopP(
@@ -304,13 +321,12 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         }
       } else {
         draft_token_manager_->AllocateSlots(rsentries_for_sample.size(), &draft_token_slots_);
-        draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
-        draft_token_manager_->CopyInHiddenStates(
-            hidden_states_for_sample.CreateView(
-                {hidden_states_for_sample->shape[0] * hidden_states_for_sample->shape[1],
-                 hidden_states_for_sample->shape[2]},
-                hidden_states_for_sample->dtype),
-            draft_token_slots_);
+        models_[model_id]->ScatterDraftProbs(renormalized_probs, draft_token_slots_,
+                                             model_workspaces_[model_id].draft_probs_storage);
+        if (engine_config_->spec_draft_length > 1) {
+          models_[model_id]->ScatterHiddenStates(hidden_states_for_sample, draft_token_slots_,
+                                                 model_workspaces_[model_id].hidden_states_storage);
+        }
 
         for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
           rsentries_for_sample[i]->mstates[model_id]->AddDraftToken(sample_results[i],

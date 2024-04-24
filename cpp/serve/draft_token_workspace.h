@@ -36,13 +36,13 @@ class DraftTokenWorkspaceManagerObj : public Object {
 
   void AllocateSlots(int num_slots, std::vector<int>* result);
 
-  void CopyInProbs(const NDArray& probs, const std::vector<int>& slots);
+  // void CopyInProbs(const NDArray& probs, const std::vector<int>& slots);
 
-  void CopyInHiddenStates(const NDArray& hidden_states, const std::vector<int>& slots);
+  // void CopyInHiddenStates(const ObjectRef& hidden_states, const std::vector<int>& slots);
 
-  void GatherProbs(const std::vector<int>& slots, NDArray* dst);
+  // void GatherProbs(const std::vector<int>& slots, NDArray* dst);
 
-  void GatherHiddenStates(const std::vector<int>& slots, NDArray* dst);
+  // void GatherHiddenStates(const std::vector<int>& slots, ObjectRef* dst);
 
   void FreeSlots(const std::vector<int>& slots);
   static constexpr const char* _type_key = "mlc.serve.DraftTokenWorkspaceManager";
@@ -63,7 +63,9 @@ class DraftTokenWorkspaceManagerObj : public Object {
   int max_num_tokens_;
   int vocab_size_;
   int hidden_size_;
+  DLDataType hidden_states_dtype_;
   DLDevice device_;
+  FunctionTable ft_;
 };
 
 class DraftTokenWorkspaceManager : public ObjectRef {

@@ -126,7 +126,7 @@ class BatchDraftActionObj : public EngineActionObj {
             renormalized_probs, sample_indices, request_ids, generation_cfg, rngs, &prob_dist);
         ICHECK_EQ(sample_results.size(), num_rsentries);
         draft_token_manager_->AllocateSlots(num_rsentries, &draft_token_slots_);
-        draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
+        models_[model_id]->ScatterDraftProbs(probs_on_device, draft_token_slots_, model_workspaces_[model_id].draft_probs_storage);
         // - Add draft token to the state.
         for (int i = 0; i < num_rsentries; ++i) {
           mstates[i]->AddDraftToken(sample_results[i], draft_token_slots_[i]);

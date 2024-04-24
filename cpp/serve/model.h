@@ -47,6 +47,9 @@ struct ModelWorkspace {
 
   /*! \brief The draft token probabilities tensor. */
   NDArray draft_probs_on_device{nullptr};
+
+  ObjectRef hidden_states_storage{nullptr};
+  NDArray draft_probs_storage{nullptr};
 };
 
 /*!
@@ -126,33 +129,21 @@ class ModelObj : public Object {
   virtual NDArray GetLogits(const ObjectRef& last_hidden_states, int batch_size, int seq_len) = 0;
 
   /*!
-   * \brief Compute logits for last hidden_states in a batch.
-   * \param last_hidden_states The last hidden_states to compute logits for.
-   * \param seq_ids The id of the sequence in the KV cache.
-   * \param lengths The length of each sequence to prefill.
-   * \return The computed logits.
-   */
-  virtual NDArray BatchGetLogits(const ObjectRef& last_hidden_states,
-                                 const std::vector<int64_t>& seq_ids,
-                                 const std::vector<int>& lengths) = 0;
-
-  /*!
    * \brief Select desired hidden_states for last hidden_states in a batch.
    * \param last_hidden_states The last hidden_states to select from.
    * \param seq_ids The id of the sequence in the KV cache.
    * \param lengths The length of each sequence to prefill.
    * \return The last hidden_states for the batch.
    */
-  virtual NDArray BatchSelectLastHidden(const ObjectRef& last_hidden_states,
-                                        const std::vector<int64_t>& seq_ids,
-                                        const std::vector<int>& lengths) = 0;
+  virtual ObjectRef BatchSelectLastHidden(const ObjectRef& last_hidden_states,
+                                        const std::vector<int>& indices) = 0;
 
-  /*!
-   * \brief Concat a list of 1D hidden_states to 2D tensor.
-   * \param hidden_states The hidden_states to concat.
-   * \param dst The copy destination.
-   */
-  virtual NDArray ConcatLastHidden(std::vector<NDArray>& hidden_states, ObjectRef* dst) = 0;
+  // /*!
+  //  * \brief Concat a list of 1D hidden_states to 2D tensor.
+  //  * \param hidden_states The hidden_states to concat.
+  //  * \param dst The copy destination.
+  //  */
+  // virtual NDArray ConcatLastHidden(std::vector<NDArray>& hidden_states, ObjectRef* dst) = 0;
 
   /*!
    * \brief Batch prefill function. Embedding in, logits out.
@@ -174,7 +165,7 @@ class ModelObj : public Object {
    * \param lengths The length of each sequence to prefill.
    * \return The hidden_states for the next token.
    */
-  virtual NDArray BatchPrefillToLastHidden(const ObjectRef& hidden_states,
+  virtual ObjectRef BatchPrefillToLastHidden(const ObjectRef& hidden_states,
                                            const std::vector<int64_t>& seq_ids,
                                            const std::vector<int>& lengths) = 0;
 
@@ -195,7 +186,7 @@ class ModelObj : public Object {
    * \param seq_id The id of the sequence in the KV cache.
    * \return The hidden_states for the next token for each sequence in the batch.
    */
-  virtual NDArray BatchDecodeToLastHidden(const ObjectRef& hidden_states,
+  virtual ObjectRef BatchDecodeToLastHidden(const ObjectRef& hidden_states,
                                           const std::vector<int64_t>& seq_ids) = 0;
 
   /*!
@@ -222,7 +213,7 @@ class ModelObj : public Object {
    * That is to say, it does not accept "running a verify step for a subset
    * of the full batch".
    */
-  virtual NDArray BatchVerifyToLastHidden(const ObjectRef& hidden_states,
+  virtual ObjectRef BatchVerifyToLastHidden(const ObjectRef& hidden_states,
                                           const std::vector<int64_t>& seq_ids,
                                           const std::vector<int>& lengths) = 0;
 
@@ -312,6 +303,19 @@ class ModelObj : public Object {
   // virtual void Gather2D(const ObjectRef &input, const ObjectRef& indices, const ObjectRef& dst) = 0;
   // /**/
   // virtual void Scatter2D(const ObjectRef &input, const ObjectRef& indices, const ObjectRef& dst) = 0;
+
+  virtual ObjectRef GatherHiddenStates(const ObjectRef& input, const std::vector<int>& indices,
+                                  const ObjectRef& dst) = 0;
+
+  virtual void ScatterHiddenStates(const ObjectRef& input, const std::vector<int>& indices,
+                                   const ObjectRef& dst) = 0;
+
+  virtual void GatherDraftProbs(const NDArray& input, const std::vector<int>& indices,
+                                const NDArray& dst) = 0;
+
+  virtual void ScatterDraftProbs(const NDArray& input, const std::vector<int>& indices,
+                                 const NDArray& dst) = 0;
+
 
   /************** Debug/Profile **************/
 

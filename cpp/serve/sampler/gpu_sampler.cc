@@ -178,8 +178,6 @@ class GPUSampler : public SamplerObj {
     CHECK_EQ(draft_probs_on_device->shape[0], num_nodes);
     NDArray uniform_samples_host = uniform_samples_host_.CreateView({num_nodes}, dtype_f32_);
     NDArray uniform_samples_device = uniform_samples_device_.CreateView({num_nodes}, dtype_f32_);
-    // NDArray draft_probs_device =
-    // draft_probs_device_.CreateView({num_nodes, vocab_size_}, dtype_f32_);
     NDArray draft_tokens_host = draft_tokens_host_.CreateView({num_nodes}, dtype_i32_);
     NDArray draft_tokens_device = draft_tokens_device_.CreateView({num_nodes}, dtype_i32_);
 
@@ -463,6 +461,10 @@ class GPUSampler : public SamplerObj {
     if (!need_top_p && !need_prob_values) {
       // - Short path: If top_p and prob values are not needed, we directly sample from multinomial.
       SyncCopyStream(device_, compute_stream_, copy_stream_);
+      // const PackedFunc* printer = runtime::Registry::Get("tvm.debug.dump_ndarray");
+      // (*printer)(probs_on_device, "sample from");
+      // (*printer)(uniform_samples_device, "uniform samples");
+      // (*printer)(sample_indices_device, "sample indices");
       sampled_token_ids_device = gpu_multinomial_from_uniform_func_(
           probs_on_device, uniform_samples_device, sample_indices_device);
       return {sampled_token_ids_device, sampled_probs_device, top_prob_probs_device,
