@@ -163,6 +163,9 @@ class GPUSampler : public SamplerObj {
       const std::vector<RandomGenerator*>& rngs,
       const std::vector<std::vector<SampleResult>>& draft_output_tokens,
       NDArray draft_probs_on_device) final {
+    const PackedFunc* printer = runtime::Registry::Get("tvm.debug.dump_ndarray");
+    (*printer)(probs_on_device, "P prob");
+    (*printer)(draft_probs_on_device, "q prob");
     NVTXScopedRange nvtx_scope("BatchVerifyDraftTokensWithProbAfterTopP");
     std::vector<std::vector<SampleResult>> sample_results;
     // probs_on_device: (n, v)
@@ -245,6 +248,7 @@ class GPUSampler : public SamplerObj {
       int start = cum_verify_lengths[i];
       int end = cum_verify_lengths[i + 1];
       int last_accepted = static_cast<int*>(token_tree_parent_ptr_host->data)[i];
+      LOG(INFO) << "last_accepted idx: " << last_accepted;
       int num_accepted = 0;
       for (int cur_node = last_accepted; cur_node != start;
            cur_node = token_tree_child_to_parent[cur_node]) {
@@ -253,12 +257,15 @@ class GPUSampler : public SamplerObj {
       }
       std::reverse(sample_results[i].rbegin(), sample_results[i].rbegin() + num_accepted);
       sample_indices.push_back(last_accepted);
+      LOG(INFO) << "num_accepted: " << num_accepted;
     }
+    LOG(INFO) <<
     std::vector<SampleResult> additional_sample_result;
     additional_sample_result = this->BatchSampleTokensWithProbAfterTopP(
         probs_on_device, sample_indices, request_ids, generation_cfg, rngs);
     ICHECK_EQ(additional_sample_result.size(), num_sequence);
     for (int i = 0; i < num_sequence; i++) {
+      LOG(INFO) << "Additional sample token id " << additional_sample_result[i].sampled_token_id.first << " from sample_index " << sample_indices[i];
       sample_results[i].push_back(additional_sample_result[i]);
     }
 

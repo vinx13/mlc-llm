@@ -86,20 +86,23 @@ class EagleBatchDraftActionObj : public EngineActionObj {
       ObjectRef hidden_states = model_workspaces_[model_id].hidden_states;
       // Concat last hidden_states
       std::vector<int> previous_draft_token_slots;
-      previous_draft_token_slots.reserve(num_rsentries);
-      for (int i = 0; i < num_rsentries; ++i) {
-        previous_draft_token_slots.push_back(mstates[i]->draft_token_slots.back());
+      NDArray hidden_states_nd{nullptr};
+      if (draft_length_ > 1) {
+        previous_draft_token_slots.reserve(num_rsentries);
+        for (int i = 0; i < num_rsentries; ++i) {
+          previous_draft_token_slots.push_back(mstates[i]->draft_token_slots.back());
+        }
+        hidden_states_nd = !hidden_states->IsInstance<DRefObj>()
+                               ? Downcast<NDArray>(hidden_states)
+                               : Downcast<DRef>(hidden_states)->DebugGetFromRemote(0);
+        ICHECK_EQ(hidden_states_nd->ndim, 2);
+        hidden_states_nd = hidden_states_nd.CreateView(
+            ShapeTuple({num_rsentries, hidden_states_nd->shape[1]}), hidden_states_nd->dtype);
+        draft_token_manager_->GatherHiddenStates(previous_draft_token_slots, &hidden_states_nd);
+        hidden_states_nd = hidden_states_nd.CreateView(
+            {hidden_states_nd->shape[0], 1, hidden_states_nd->shape[1]}, hidden_states_nd->dtype);
+        last_hidden_states = hidden_states_nd;
       }
-      NDArray hidden_states_nd = !hidden_states->IsInstance<DRefObj>()
-                                     ? Downcast<NDArray>(hidden_states)
-                                     : Downcast<DRef>(hidden_states)->DebugGetFromRemote(0);
-      ICHECK_EQ(hidden_states_nd->ndim, 2);
-      hidden_states_nd = hidden_states_nd.CreateView(
-          ShapeTuple({num_rsentries, hidden_states_nd->shape[1]}), hidden_states_nd->dtype);
-      draft_token_manager_->GatherHiddenStates(previous_draft_token_slots, &hidden_states_nd);
-      hidden_states_nd = hidden_states_nd.CreateView(
-          {hidden_states_nd->shape[0], 1, hidden_states_nd->shape[1]}, hidden_states_nd->dtype);
-      last_hidden_states = hidden_states_nd;
       // The first draft token has been generated in prefill/verify stage
       for (int draft_id = 1; draft_id < draft_length_; ++draft_id) {
         // prepare new input tokens

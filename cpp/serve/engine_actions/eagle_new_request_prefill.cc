@@ -277,12 +277,15 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
           rsentry_activated.push_back(true);
         }
       }
+
       NDArray renormalized_probs = sampler_->BatchRenormalizeProbsByTopP(
           probs_on_device, sample_indices, request_ids, generation_cfg);
       std::vector<SampleResult> sample_results = sampler_->BatchSampleTokensWithProbAfterTopP(
           renormalized_probs, sample_indices, request_ids, generation_cfg, rngs);
       ICHECK_EQ(sample_results.size(), rsentries_for_sample.size());
 
+    const PackedFunc* printer = runtime::Registry::Get("tvm.debug.dump_ndarray");
+    (*printer)(renormalized_probs, std::string("prob model ") + std::to_string(model_id));
       // - Update the committed tokens of states.
       // - If a request is first-time prefilled, set the prefill finish time.
       auto tnow = std::chrono::high_resolution_clock::now();
@@ -304,7 +307,10 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         }
       } else {
         draft_token_manager_->AllocateSlots(rsentries_for_sample.size(), &draft_token_slots_);
-        draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
+        for (int i = 0; i < rsentries_for_sample.size(); i++) {
+          LOG(INFO) << "Slot " << draft_token_slots_[i];
+        }
+        draft_token_manager_->CopyInProbs(renormalized_probs, draft_token_slots_);
         draft_token_manager_->CopyInHiddenStates(
             hidden_states_for_sample.CreateView(
                 {hidden_states_for_sample->shape[0] * hidden_states_for_sample->shape[1],

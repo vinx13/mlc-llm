@@ -91,11 +91,17 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       rngs.push_back(&rsentries[i]->rng);
       draft_output_tokens.push_back(draft_mstate->draft_output_tokens);
     }
+    for (auto token: all_tokens_to_verify) {
+      LOG(INFO) << "All_tokens_to_verify: " << token;
+    }
 
     NDArray draft_probs_on_device = model_workspaces_[draft_model_id_].draft_probs_on_device;
     draft_probs_on_device = draft_probs_on_device.CreateView(
         {static_cast<int64_t>(draft_token_slots_.size()), draft_probs_on_device->shape[1]},
         draft_probs_on_device->dtype);
+    for (int i = 0; i < draft_token_slots_.size(); ++i) {
+      LOG(INFO) << "Gather prob slot : " << draft_token_slots_[i];
+    }
     draft_token_manager_->GatherProbs(draft_token_slots_, &draft_probs_on_device);
 
     std::vector<int> cum_verify_lengths = {0};
@@ -150,16 +156,19 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
     for (int i = 0; i < num_rsentries; ++i) {
       const std::vector<SampleResult>& sample_results = sample_results_arr[i];
       int accept_length = sample_results.size();
+      LOG(INFO) << "Accepted length: " << accept_length;
       ICHECK_GE(accept_length, 1);
       for (SampleResult sample_result : sample_results) {
         rsentries[i]->mstates[verify_model_id_]->CommitToken(sample_result);
         rsentries[i]->mstates[draft_model_id_]->CommitToken(sample_result);
+        LOG(INFO) << "Commit " << sample_result.sampled_token_id.first;
       }
       estate->stats.total_accepted_length += accept_length - 1;
       // - Minus one because the last draft token has no kv cache entry
       // - Take max with 0 in case of all accepted.
       int rollback_length =
           std::max(cum_verify_lengths[i + 1] - cum_verify_lengths[i] - accept_length, 0);
+      LOG(INFO) << "rollback lenght: " << rollback_length;
       // rollback kv cache
       // NOTE: when number of small models is more than 1 (in the future),
       // it is possible to re-compute prefill for the small models.
@@ -174,6 +183,7 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       rsentries[i]->mstates[draft_model_id_]->RemoveAllDraftTokens(&draft_token_manager_);
       // - Slice hidden_states_for_sample
       last_accepted_hidden_positions.push_back(cum_verify_lengths[i] + accept_length - 1);
+      LOG(INFO) << "last accepted pos: " << last_accepted_hidden_positions.back();
     }
     NDArray hidden_states_for_draft =
         Downcast<NDArray>(model_workspaces_[draft_model_id_].hidden_states)
@@ -202,6 +212,7 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       for (int i = 0; i < num_rsentries; ++i) {
         ICHECK(!mstates[i]->committed_tokens.empty());
         input_tokens.push_back(mstates[i]->committed_tokens.back().sampled_token_id.first);
+        LOG(INFO) << "last committed token id " << input_tokens.back();
       }
 
       // - Compute embeddings.
