@@ -6,7 +6,7 @@ import tvm
 from tvm import IRModule, relax, te, tir
 from tvm.relax.frontend import nn
 from tvm.script import tir as T
-
+from .utils import get_vocab_size
 from ..op.batch_spec_verify import batch_spec_verify
 
 
@@ -32,15 +32,7 @@ class AttachGPUSamplingFunc:  # pylint: disable=too-few-public-methods
             return mod
 
         bb = relax.BlockBuilder(mod)
-        # Prefill method exists in base models.
-        # Prefill_to_last_hidden method exists in base model and speculative small models
-        if "prefill" in mod:
-            vocab_size = mod["prefill"].ret_struct_info.fields[0].shape[-1]
-        else:
-            assert (
-                "prefill_to_last_hidden_states" in mod
-            ), "Everay model should either has 'prefill' or 'prefill_to_last_hidden_states' method"
-            vocab_size = mod["prefill_to_last_hidden_states"].ret_struct_info.fields[0].shape[-1]
+        vocab_size = get_vocab_size(mod)
         gv_names = [
             gv.name_hint
             for gv in [

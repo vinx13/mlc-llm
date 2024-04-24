@@ -289,12 +289,12 @@ class LogitProcessorImpl : public LogitProcessorObj {
           p_penalties[num_token_for_penalty * 3 + 2] = generation_cfg[i]->repetition_penalty;
           ++num_token_for_penalty;
           if (j > 0) {
-            mstates[i]->AddDraftToken(draft_tokens->at(i)[j - 1], NDArray(), NDArray());
+            mstates[i]->AddDraftToken(draft_tokens->at(i)[j - 1], -1);
           }
         }
         if (num_token_to_process != 1) {
-          // Roll back.
-          mstates[i]->RemoveAllDraftTokens();
+          // Roll back.These draft tokens do not have associated workspace slots.
+          mstates[i]->RemoveAllDraftTokens(nullptr);
         }
       }
     }
@@ -368,12 +368,14 @@ class LogitProcessorImpl : public LogitProcessorObj {
           p_seq_ids[token_start_offset + j] = 1;
         }
         if (j > 0) {
-          mstates[i]->AddDraftToken(draft_tokens->at(i)[j - 1], NDArray(), NDArray());
+          // TODO
+          // mstates[i]->AddDraftToken(draft_tokens->at(i)[j - 1], NDArray(), NDArray());
         }
       }
       if (token_number != 1) {
         // Roll back.
-        mstates[i]->RemoveAllDraftTokens();
+        // TODO
+        // mstates[i]->RemoveAllDraftTokens();
       }
     }
 

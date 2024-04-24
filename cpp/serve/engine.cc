@@ -17,6 +17,7 @@
 #include <unordered_set>
 
 #include "../tokenizers.h"
+#include "draft_token_workspace.h"
 #include "engine_actions/action.h"
 #include "engine_actions/action_commons.h"
 #include "engine_state.h"
@@ -63,10 +64,12 @@ class EngineImpl : public Engine {
     this->model_workspaces_.clear();
 
     auto f_create_model = [this, &engine_config, &trace_recorder](const String& model_path,
-                                                                  const String& model_lib_path) {
+                                                                  const String& model_lib_path,
+                                                                  int model_index) {
       Model model = Model::Create(model_lib_path, std::move(model_path), engine_config->device,
                                   engine_config->max_num_sequence,
                                   /*trace_enabled=*/trace_recorder.defined());
+      LOG(INFO) << "kv cache size " << engine_config->kv_cache_page_size;
       model->CreateKVCache(engine_config->kv_cache_page_size, engine_config->max_num_sequence,
                            engine_config->max_total_sequence_length,
                            engine_config->prefill_chunk_size);
@@ -75,22 +78,32 @@ class EngineImpl : public Engine {
           << ", is smaller than the pre-defined max single sequence length, "
           << engine_config->max_single_sequence_length;
       this->models_.push_back(model);
-      this->model_workspaces_.push_back(
-          ModelWorkspace{model->AllocEmbeddingTensor(), model->AllocHiddenStatesTensor()});
+      ModelWorkspace workspace;
+      workspace.embeddings = model->AllocEmbeddingTensor();
+      // if (engine_config->speculative_mode != SpeculativeMode::kDisable && model_index >= 1) {
+      //   if (engine_config->speculative_mode == SpeculativeMode::kEagle) {
+      //     workspace.hidden_states = model->AllocHiddenStatesTensor();
+      //   };
+      // }
+      this->model_workspaces_.push_back(std::move(workspace));
     };
 
-    f_create_model(engine_config->model, engine_config->model_lib_path);
+    f_create_model(engine_config->model, engine_config->model_lib_path, 0);
     CHECK_EQ(engine_config->additional_models.size(),
              engine_config->additional_model_lib_paths.size())
         << "The additional model and lib path list has mismatched size.";
     for (int i = 0; i < static_cast<int>(engine_config->additional_models.size()); ++i) {
       f_create_model(engine_config->additional_models[i],
-                     engine_config->additional_model_lib_paths[i]);
+                     engine_config->additional_model_lib_paths[i], i + 1);
     }
 
     int max_num_tokens = engine_config->max_num_sequence;
     if (engine_config->speculative_mode != SpeculativeMode::kDisable) {
       max_num_tokens *= engine_config->spec_draft_length + 1;
+      // Speculative decoding is only possible for more than one model.
+      ICHECK_GT(this->models_.size(), 1U);
+      CreateSpeculativeDraftModelWorkspace(engine_config, max_num_tokens, models_,
+                                           &this->model_workspaces_);
     }
     LogitProcessor logit_processor =
         this->models_[0]->CreateLogitProcessor(max_num_tokens, trace_recorder);
@@ -98,34 +111,48 @@ class EngineImpl : public Engine {
         max_num_tokens, static_cast<int>(this->models_.size()), trace_recorder);
     // Step 3. Initialize engine actions that represent state transitions.
     if (engine_config->speculative_mode != SpeculativeMode::kDisable) {
-      // Speculative decoding is only possible for more than one model.
-      ICHECK_GT(this->models_.size(), 1U);
+      DraftTokenWorkspaceManager draft_token_workspace_manager = models_[1]->GetDraftTokenManager();
       switch (engine_config->speculative_mode) {
         case SpeculativeMode::kEagle:
-          this->actions_ = {EngineAction::EagleNewRequestPrefill(this->models_,            //
-                                                                 logit_processor,          //
-                                                                 sampler,                  //
-                                                                 this->model_workspaces_,  //
-                                                                 engine_config,            //
+          this->actions_ = {EngineAction::EagleNewRequestPrefill(this->models_,                  //
+                                                                 logit_processor,                //
+                                                                 sampler,                        //
+                                                                 this->model_workspaces_,        //
+                                                                 engine_config,                  //
+                                                                 draft_token_workspace_manager,  //
                                                                  this->trace_recorder_),
-                            EngineAction::EagleBatchDraft(
-                                this->models_, logit_processor, sampler, this->model_workspaces_,
-                                this->trace_recorder_, engine_config->spec_draft_length),
-                            EngineAction::EagleBatchVerify(this->models_, logit_processor, sampler,
-                                                           this->model_workspaces_, engine_config,
+                            EngineAction::EagleBatchDraft(this->models_,                  //
+                                                          logit_processor,                //
+                                                          sampler,                        //
+                                                          this->model_workspaces_,        //
+                                                          draft_token_workspace_manager,  //
+                                                          this->trace_recorder_,          //
+                                                          engine_config->spec_draft_length),
+                            EngineAction::EagleBatchVerify(this->models_,                  //
+                                                           logit_processor,                //
+                                                           sampler,                        //
+                                                           this->model_workspaces_,        //
+                                                           engine_config,                  //
+                                                           draft_token_workspace_manager,  //
                                                            this->trace_recorder_)};
           break;
         default:
-          this->actions_ = {EngineAction::NewRequestPrefill(this->models_,            //
-                                                            logit_processor,          //
-                                                            sampler,                  //
-                                                            this->model_workspaces_,  //
-                                                            engine_config,            //
-                                                            this->trace_recorder_),
-                            EngineAction::BatchDraft(this->models_, logit_processor, sampler,
-                                                     this->trace_recorder_),
-                            EngineAction::BatchVerify(this->models_, logit_processor, sampler,
-                                                      engine_config, this->trace_recorder_)};
+          this->actions_ = {
+              EngineAction::NewRequestPrefill(this->models_,            //
+                                              logit_processor,          //
+                                              sampler,                  //
+                                              this->model_workspaces_,  //
+                                              engine_config,            //
+                                              this->trace_recorder_),
+              EngineAction::BatchDraft(this->models_,                  //
+                                       logit_processor,                //
+                                       sampler,                        //
+                                       this->model_workspaces_,        //
+                                       draft_token_workspace_manager,  //
+                                       this->trace_recorder_),
+              EngineAction::BatchVerify(this->models_, logit_processor, sampler,
+                                        this->model_workspaces_, engine_config,
+                                        draft_token_workspace_manager, this->trace_recorder_)};
       }
     } else {
       this->actions_ = {EngineAction::NewRequestPrefill(this->models_,            //
@@ -315,6 +342,19 @@ class EngineImpl : public Engine {
     } else {
       return grammar_init_context_storage_->GetInitContextForJSONSchema(
           response_format.schema.value());
+    }
+  }
+
+  void CreateSpeculativeDraftModelWorkspace(
+      const EngineConfig& engine_config, int max_num_tokens, const Array<Model>& models,
+      std::vector<ModelWorkspace>* model_workspace) {
+    for (int i = 1; i < static_cast<int>(model_workspace->size()); ++i) {
+      ModelWorkspace& workspace = model_workspace->at(i);
+      if (engine_config->speculative_mode == SpeculativeMode::kEagle) {
+        workspace.hidden_states = models[i]->AllocHiddenStatesTensor();
+      }
+      auto draft_token_workspace_manager = models[i]->CreateDraftTokenManager(max_num_tokens);
+      draft_token_workspace_manager->AllocWorkspace(&workspace);
     }
   }
 

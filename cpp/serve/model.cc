@@ -833,20 +833,24 @@ class ModelImpl : public ModelObj {
     // Allocate the hidden_states tensor.
     // Use the same function as embeddings.
     ObjectRef hidden_states = ft_.alloc_embedding_tensor_func_();
+    NDArray hidden_states_nd{nullptr};
     // Get the shape of the hidden_states tensor for hidden size.
-    ShapeTuple hidden_states_shape;
     if (ft_.use_disco) {
       ICHECK(hidden_states->IsInstance<DRefObj>());
-      ObjectRef shape_ref = ft_.nd_get_shape_func_(hidden_states);
-      hidden_states_shape = Downcast<DRef>(shape_ref)->DebugGetFromRemote(0);
+      hidden_states_nd = Downcast<DRef>(hidden_states)->DebugGetFromRemote(0);
     } else {
-      NDArray hidden_states_nd = Downcast<NDArray>(hidden_states);
-      hidden_states_shape = hidden_states_nd.Shape();
+      hidden_states_nd = Downcast<NDArray>(hidden_states);
     }
+    ShapeTuple hidden_states_shape = hidden_states_nd.Shape();
     ICHECK_EQ(hidden_states_shape.size(), 2);
     ICHECK_EQ(hidden_states_shape[0], prefill_chunk_size_);
     this->hidden_size_ = hidden_states_shape[1];
+    this->hidden_dtype_ = hidden_states_nd->dtype;
     return hidden_states;
+  }
+
+  DraftTokenWorkspaceManager GetDraftTokenManager() const final {
+    return draft_token_workspace_manager_;
   }
 
   void Reset() final {
@@ -856,6 +860,11 @@ class ModelImpl : public ModelObj {
     }
   }
 
+  DraftTokenWorkspaceManager CreateDraftTokenManager(int max_num_tokens) {
+    draft_token_workspace_manager_ = DraftTokenWorkspaceManager(
+        max_num_tokens, vocab_size_, hidden_size_, hidden_dtype_, device_, ft_);
+    return draft_token_workspace_manager_;
+  }
   /************** Debug/Profile **************/
 
   void DebugCallFuncOnAllAllWorker(const String& func_name) final {
@@ -922,6 +931,7 @@ class ModelImpl : public ModelObj {
   int max_num_sequence_ = -1;
   int prefill_chunk_size_ = -1;
   int hidden_size_ = -1;
+  DLDataType hidden_dtype_;
   int vocab_size_ = -1;
   int image_embed_size_ = -1;
   //----------------------------
@@ -946,6 +956,9 @@ class ModelImpl : public ModelObj {
   NDArray logit_pos_arr_{nullptr};
   // A boolean indicating if tracing is enabled.
   bool trace_enabled_;
+
+  // Draft token workspace manager. Only defined for the speculative models.
+  DraftTokenWorkspaceManager draft_token_workspace_manager_{nullptr};
 };
 
 TVM_REGISTER_GLOBAL("mlc.copy_embedding_to_offset")

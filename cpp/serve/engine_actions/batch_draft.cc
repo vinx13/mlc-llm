@@ -23,10 +23,14 @@ namespace serve {
 class BatchDraftActionObj : public EngineActionObj {
  public:
   explicit BatchDraftActionObj(Array<Model> models, LogitProcessor logit_processor, Sampler sampler,
+  std::vector<ModelWorkspace> model_workspaces,
+                               DraftTokenWorkspaceManager draft_token_manager,
                                Optional<EventTraceRecorder> trace_recorder, int draft_length)
       : models_(std::move(models)),
         logit_processor_(std::move(logit_processor)),
         sampler_(std::move(sampler)),
+        model_workspaces_(std::move(model_workspaces)),
+        draft_token_manager_(std::move(draft_token_manager)),
         trace_recorder_(std::move(trace_recorder)),
         draft_length_(draft_length) {
     ICHECK_GT(draft_length_, 0);
@@ -121,10 +125,11 @@ class BatchDraftActionObj : public EngineActionObj {
         std::vector<SampleResult> sample_results = sampler_->BatchSampleTokensWithProbAfterTopP(
             renormalized_probs, sample_indices, request_ids, generation_cfg, rngs, &prob_dist);
         ICHECK_EQ(sample_results.size(), num_rsentries);
-
+        draft_token_manager_->AllocateSlots(num_rsentries, &draft_token_slots_);
+        draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
         // - Add draft token to the state.
         for (int i = 0; i < num_rsentries; ++i) {
-          mstates[i]->AddDraftToken(sample_results[i], prob_dist[i]);
+          mstates[i]->AddDraftToken(sample_results[i], draft_token_slots_[i]);
           estate->stats.total_draft_length += 1;
         }
       }
@@ -156,18 +161,28 @@ class BatchDraftActionObj : public EngineActionObj {
   LogitProcessor logit_processor_;
   /*! \brief The sampler to sample new tokens. */
   Sampler sampler_;
+  /*! \brief Model workspaces. */
+  std::vector<ModelWorkspace> model_workspaces_;
+  /*! \brief Draft token manager. */
+  DraftTokenWorkspaceManager draft_token_manager_;
   /*! \brief Event trace recorder. */
   Optional<EventTraceRecorder> trace_recorder_;
   /*! \brief Draft proposal length */
   int draft_length_;
+    /*! \brief Temporary buffer to store the slots of the current draft tokens */
+  std::vector<int> draft_token_slots_;
 };
 
 EngineAction EngineAction::BatchDraft(Array<Model> models, LogitProcessor logit_processor,
-                                      Sampler sampler, Optional<EventTraceRecorder> trace_recorder,
+                                    Sampler sampler,
+                                     std::vector<ModelWorkspace> model_workspaces,
+                                      DraftTokenWorkspaceManager draft_token_manager,
+                                      Optional<EventTraceRecorder> trace_recorder,
                                       int draft_length) {
   return EngineAction(make_object<BatchDraftActionObj>(
-      std::move(models), std::move(logit_processor), std::move(sampler), std::move(trace_recorder),
-      draft_length));
+      std::move(models), std::move(logit_processor), std::move(sampler),
+      std::move(model_workspaces),
+      std::move(draft_token_manager), std::move(trace_recorder), draft_length));
 }
 
 }  // namespace serve

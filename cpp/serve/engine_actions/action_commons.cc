@@ -169,7 +169,8 @@ RequestStateEntry PreemptLastRunningRequestStateEntry(EngineState estate,
   RECORD_EVENT(trace_recorder, rsentry->request->id, "preempt");
   rsentry->status = RequestStateStatus::kPending;
   for (RequestModelState mstate : rsentry->mstates) {
-    mstate->RemoveAllDraftTokens();
+    DraftTokenWorkspaceManager draft_workspace_manager = models[mstate->model_id]->GetDraftTokenManager();
+    mstate->RemoveAllDraftTokens(&draft_workspace_manager);
     std::vector<int32_t> committed_token_ids;
     committed_token_ids.reserve(mstate->committed_tokens.size());
     for (const SampleResult& committed_token : mstate->committed_tokens) {

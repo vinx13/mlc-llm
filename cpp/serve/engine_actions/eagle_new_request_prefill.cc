@@ -25,12 +25,14 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
                                            Sampler sampler,
                                            std::vector<ModelWorkspace> model_workspaces,
                                            EngineConfig engine_config,
+                                           DraftTokenWorkspaceManager draft_token_manager,
                                            Optional<EventTraceRecorder> trace_recorder)
       : models_(std::move(models)),
         logit_processor_(std::move(logit_processor)),
         sampler_(std::move(sampler)),
         model_workspaces_(std::move(model_workspaces)),
         engine_config_(std::move(engine_config)),
+        draft_token_manager_(std::move(draft_token_manager)),
         trace_recorder_(std::move(trace_recorder)) {}
 
   Array<Request> Step(EngineState estate) final {
@@ -107,7 +109,6 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         }
 
         ICHECK(mstate->draft_output_tokens.empty());
-        ICHECK(mstate->draft_output_prob_dist.empty());
         if (status_before_prefill[i] == RequestStateStatus::kPending) {
           // Add the sequence to the model, or fork the sequence from its parent.
           if (rsentry->parent_idx == -1) {
@@ -276,18 +277,17 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
           rsentry_activated.push_back(true);
         }
       }
-      std::vector<NDArray> prob_dist;
       NDArray renormalized_probs = sampler_->BatchRenormalizeProbsByTopP(
           probs_on_device, sample_indices, request_ids, generation_cfg);
       std::vector<SampleResult> sample_results = sampler_->BatchSampleTokensWithProbAfterTopP(
-          renormalized_probs, sample_indices, request_ids, generation_cfg, rngs, &prob_dist);
+          renormalized_probs, sample_indices, request_ids, generation_cfg, rngs);
       ICHECK_EQ(sample_results.size(), rsentries_for_sample.size());
 
       // - Update the committed tokens of states.
       // - If a request is first-time prefilled, set the prefill finish time.
       auto tnow = std::chrono::high_resolution_clock::now();
-      for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
-        if (model_id == 0) {
+      if (model_id == 0) {
+        for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
           for (int mid = 0; mid < static_cast<int>(models_.size()); ++mid) {
             rsentries_for_sample[i]->mstates[mid]->CommitToken(sample_results[i]);
             if (!rsentry_activated[i]) {
@@ -301,13 +301,20 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
           if (rsentries_for_sample[i]->mstates[0]->committed_tokens.size() == 1) {
             rsentries_for_sample[i]->tprefill_finish = tnow;
           }
-        } else {
-          // - Slice hidden_states_for_sample
-          NDArray last_hidden_on_device = GetTokenHidden(hidden_states_for_sample, i);
-          CHECK(i < static_cast<int>(prob_dist.size()));
-          CHECK(prob_dist[i].defined());
-          rsentries_for_sample[i]->mstates[model_id]->AddDraftToken(sample_results[i], prob_dist[i],
-                                                                    last_hidden_on_device);
+        }
+      } else {
+        draft_token_manager_->AllocateSlots(rsentries_for_sample.size(), &draft_token_slots_);
+        draft_token_manager_->CopyInProbs(probs_on_device, draft_token_slots_);
+        draft_token_manager_->CopyInHiddenStates(
+            hidden_states_for_sample.CreateView(
+                {hidden_states_for_sample->shape[0] * hidden_states_for_sample->shape[1],
+                 hidden_states_for_sample->shape[2]},
+                hidden_states_for_sample->dtype),
+            draft_token_slots_);
+
+        for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
+          rsentries_for_sample[i]->mstates[model_id]->AddDraftToken(sample_results[i],
+                                                                    draft_token_slots_[i]);
           estate->stats.total_draft_length += 1;
         }
       }
@@ -554,25 +561,25 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
     ICHECK(false) << "Cannot reach here";
   }
 
-  /*!
-   * \brief Get one item from a hidden_states array, which corresponds to the last token.
-   * \param hidden_states The hidden_states of all the tokens.
-   * \param token_pos The desired token position in the sequence.
-   * \return The desired token's hidden_states
-   */
-  NDArray GetTokenHidden(NDArray hidden_states, int token_pos) {
-    ICHECK_EQ(hidden_states->ndim, 3);
-    NDArray last_hidden_on_device =
-        NDArray::Empty({hidden_states->shape[2]}, hidden_states->dtype, hidden_states->device);
+  // /*!
+  //  * \brief Get one item from a hidden_states array, which corresponds to the last token.
+  //  * \param hidden_states The hidden_states of all the tokens.
+  //  * \param token_pos The desired token position in the sequence.
+  //  * \return The desired token's hidden_states
+  //  */
+  // NDArray GetTokenHidden(NDArray hidden_states, int token_pos) {
+  //   ICHECK_EQ(hidden_states->ndim, 3);
+  //   NDArray last_hidden_on_device =
+  //       NDArray::Empty({hidden_states->shape[2]}, hidden_states->dtype, hidden_states->device);
 
-    int64_t ndata = hidden_states->shape[2];
-    const int16_t* __restrict p_hidden =
-        static_cast<int16_t*>(__builtin_assume_aligned(hidden_states->data, 2)) +
-        (token_pos * ndata);
+  //   int64_t ndata = hidden_states->shape[2];
+  //   const int16_t* __restrict p_hidden =
+  //       static_cast<int16_t*>(__builtin_assume_aligned(hidden_states->data, 2)) +
+  //       (token_pos * ndata);
 
-    last_hidden_on_device.CopyFromBytes(p_hidden, ndata * sizeof(int16_t));
-    return last_hidden_on_device;
-  }
+  //   last_hidden_on_device.CopyFromBytes(p_hidden, ndata * sizeof(int16_t));
+  //   return last_hidden_on_device;
+  // }
 
   /*! \brief The models to run prefill in. */
   Array<Model> models_;
@@ -584,18 +591,24 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
   std::vector<ModelWorkspace> model_workspaces_;
   /*! \brief The engine config. */
   EngineConfig engine_config_;
+  /*! \brief The draft token manager. */
+  DraftTokenWorkspaceManager draft_token_manager_;
   /*! \brief Event trace recorder. */
   Optional<EventTraceRecorder> trace_recorder_;
+  /*! \brief Temporary buffer to store the slots of the current draft tokens */
+  std::vector<int> draft_token_slots_;
 };
 
 EngineAction EngineAction::EagleNewRequestPrefill(Array<Model> models,
                                                   LogitProcessor logit_processor, Sampler sampler,
                                                   std::vector<ModelWorkspace> model_workspaces,
                                                   EngineConfig engine_config,
+                                                  DraftTokenWorkspaceManager draft_token_manager,
                                                   Optional<EventTraceRecorder> trace_recorder) {
   return EngineAction(make_object<EagleNewRequestPrefillActionObj>(
       std::move(models), std::move(logit_processor), std::move(sampler),
-      std::move(model_workspaces), std::move(engine_config), std::move(trace_recorder)));
+      std::move(model_workspaces), std::move(engine_config), std::move(draft_token_manager),
+      std::move(trace_recorder)));
 }
 
 }  // namespace serve

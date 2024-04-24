@@ -12,11 +12,11 @@
 
 #include "../base.h"
 #include "config.h"
+#include "draft_token_workspace.h"
 #include "event_trace_recorder.h"
 #include "function_table.h"
 #include "logit_processor.h"
 #include "sampler/sampler.h"
-
 namespace mlc {
 namespace llm {
 namespace serve {
@@ -44,6 +44,9 @@ struct ModelWorkspace {
    * model parallelism is not enabled, or a DRef when using tensor model parallelism.
    */
   ObjectRef hidden_states{nullptr};
+
+  /*! \brief The draft token probabilities tensor. */
+  NDArray draft_probs_on_device{nullptr};
 };
 
 /*!
@@ -277,6 +280,10 @@ class ModelObj : public Object {
   virtual Sampler CreateSampler(int max_num_sample, int num_models,
                                 Optional<EventTraceRecorder> trace_recorder) = 0;
 
+  virtual DraftTokenWorkspaceManager CreateDraftTokenManager(int max_num_token) = 0;
+
+  virtual DraftTokenWorkspaceManager GetDraftTokenManager() const = 0;
+
   /*!
    * \brief Estimate number of CPU units required to drive the model
    * executing during TP.
@@ -297,6 +304,14 @@ class ModelObj : public Object {
 
   /*! \brief Reset the model KV cache and other statistics. */
   virtual void Reset() = 0;
+
+  // /*! \bried Gather the rows of the input tensor with the given indices.
+  //  * \param input The input NDAray of DRef of shape [batch_size, n]
+  //  * \param indices The indices NDArray of DRef of shape [batch_size]
+  //  */
+  // virtual void Gather2D(const ObjectRef &input, const ObjectRef& indices, const ObjectRef& dst) = 0;
+  // /**/
+  // virtual void Scatter2D(const ObjectRef &input, const ObjectRef& indices, const ObjectRef& dst) = 0;
 
   /************** Debug/Profile **************/
 

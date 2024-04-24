@@ -15,6 +15,7 @@
 #include "../random.h"
 #include "../streamer.h"
 #include "config.h"
+#include "draft_token_workspace.h"
 #include "grammar/grammar_state_matcher.h"
 #include "request.h"
 
@@ -62,20 +63,8 @@ class RequestModelStateNode : public Object {
    * result of speculation.
    */
   std::vector<SampleResult> draft_output_tokens;
-  /*!
-   * \brief The probability distribution on each position in the
-   * draft. We keep the distributions for stochastic sampling when merging
-   * speculations from multiple models.
-   * \note We only need this value when we have multiple parallel small models
-   * and draft outputs in speculative inference settings.
-   */
-  std::vector<NDArray> draft_output_prob_dist;
-  /*!
-   * \brief The last hidden_states used to get probs in drafting.
-   * \note We only need this value when we have multiple parallel small models
-   * and draft outputs in speculative inference settings.
-   */
-  std::vector<NDArray> draft_last_hidden_on_device;
+  /*! \brief The storage slots for the associated states of draft tokens. */
+  std::vector<int> draft_token_slots;
   /*! \brief The appeared committed and draft tokens and their occurrence times. */
   std::unordered_map<int32_t, int32_t> appeared_token_ids;
 
@@ -101,17 +90,21 @@ class RequestModelStateNode : public Object {
   /*! \brief Commit a new token into committed_tokens. Update appeared_token_ids. */
   void CommitToken(SampleResult sampled_token);
   /*! \brief Add a draft token into draft_output_tokens. Update appeared_token_ids. */
-  void AddDraftToken(SampleResult sampled_token, NDArray prob_dist,
-                     NDArray draft_last_hidden_on_device = NDArray());
-  /*! \brief Remove the last token from draft_output_tokens. Update appeared_token_ids. */
-  void RemoveLastDraftToken();
-  /*! \brief Remove all draft tokens from draft_output_tokens. Update appeared_token_ids. */
-  void RemoveAllDraftTokens();
+  void AddDraftToken(SampleResult sampled_token, int draft_token_slot);
+  /*! \brief Remove all draft tokens from draft_output_tokens. Update appeared_token_ids.
+   * \param draft_token_manager The optional draft token workspace manager to release the slots if
+   * provided.
+   */
+  void RemoveAllDraftTokens(DraftTokenWorkspaceManager* draft_token_manager);
 
   static constexpr const char* _type_key = "mlc.serve.RequestModelState";
   static constexpr const bool _type_has_method_sequal_reduce = false;
   static constexpr const bool _type_has_method_shash_reduce = false;
   TVM_DECLARE_BASE_OBJECT_INFO(RequestModelStateNode, Object);
+
+ private:
+  /*! \brief Remove the last token from draft_output_tokens. Update appeared_token_ids. */
+  void RemoveLastDraftToken();
 };
 
 class RequestModelState : public ObjectRef {

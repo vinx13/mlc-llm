@@ -272,6 +272,12 @@ void FunctionTable::_InitFunctions() {
   this->nd_get_shape_func_ = get_global_func("vm.builtin.shape_of");
   this->nd_copy_embedding_to_offset_func_ = get_global_func("mlc.copy_embedding_to_offset");
   support_backtracking_kv_ = true;
+
+  this->gather_probs_func_ = mod->GetFunction("gather_probs", true);
+  this->scatter_probs_func_ = mod->GetFunction("scatter_probs", true);
+  this->gather_hidden_states_func_ = mod->GetFunction("gather_hidden_states", true);
+  this->scatter_hidden_states_func_ = mod->GetFunction("scatter_hidden_states", true);
+  this->gather_scatter_hidden_states_func_ = mod->GetFunction("gather_scatter_hidden_states", true);
 }
 
 ObjectRef FunctionTable::Empty(ShapeTuple shape, DataType dtype, Device device) const {

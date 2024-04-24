@@ -109,6 +109,12 @@ struct FunctionTable {
   PackedFunc nd_view_func_;
   PackedFunc nd_get_shape_func_;
   PackedFunc nd_copy_embedding_to_offset_func_;
+  // Auxiliary functions for speculative decoding.
+  PackedFunc gather_probs_func_;
+  PackedFunc scatter_probs_func_;
+  PackedFunc gather_hidden_states_func_;
+  PackedFunc scatter_hidden_states_func_;
+  PackedFunc gather_scatter_hidden_states_func_;
 };
 
 }  // namespace serve
