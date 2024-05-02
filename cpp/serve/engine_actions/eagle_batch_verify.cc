@@ -146,7 +146,9 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
       const std::vector<SampleResult>& sample_results = sample_results_arr[i];
       int accept_length = sample_results.size();
       ICHECK_GE(accept_length, 1);
+      LOG(INFO) << "accept " << accept_length - 1;
       for (SampleResult sample_result : sample_results) {
+        LOG(INFO) << "Commit token: " << sample_result.sampled_token_id.first;
         rsentries[i]->mstates[verify_model_id_]->CommitToken(sample_result);
         rsentries[i]->mstates[draft_model_id_]->CommitToken(sample_result);
       }
@@ -247,6 +249,7 @@ class EagleBatchVerifyActionObj : public EngineActionObj {
           &model_workspaces_[verify_model_id_].draft_hidden_states_storage);
       // - Add draft token to the state.
       for (int i = 0; i < num_rsentries; ++i) {
+        LOG(INFO) << "AddDraftToken: " << sample_results[i].sampled_token_id.first;
         mstates[i]->AddDraftToken(sample_results[i], draft_token_slots_[i]);
         estate->stats.total_draft_length += 1;
       }

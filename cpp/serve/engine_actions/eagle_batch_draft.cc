@@ -69,6 +69,8 @@ class EagleBatchDraftActionObj : public EngineActionObj {
       rngs.push_back(&rsentry->rng);
     }
 
+        const PackedFunc* printer = tvm::runtime::Registry::Get("tvm.debug.dump_ndarray");
+
     // The first model doesn't get involved in draft proposal.
     for (int model_id = 1; model_id < static_cast<int>(models_.size()); ++model_id) {
       // Collect
@@ -101,7 +103,11 @@ class EagleBatchDraftActionObj : public EngineActionObj {
           ICHECK(!mstates[i]->draft_output_tokens.empty());
           input_tokens.push_back(mstates[i]->draft_output_tokens.back().sampled_token_id.first);
         }
-
+        {
+          std::ostringstream oss;
+          oss << "Draft ID " << draft_id << " input tokens: " << input_tokens.back();
+          // (*printer)(hidden_states, "hidden_states");
+        }
         // - Compute embeddings.
         RECORD_EVENT(trace_recorder_, request_ids, "start proposal embedding");
         ObjectRef embeddings =
@@ -123,6 +129,7 @@ class EagleBatchDraftActionObj : public EngineActionObj {
           logits =
               models_[0]->GetLogits(hidden_states, /*batch_size*/ num_rsentries, /*seq_len*/ 1);
         }
+        // (*printer)(logits, "logits");
         RECORD_EVENT(trace_recorder_, request_ids, "finish proposal decode");
         ICHECK_EQ(logits->ndim, 3);
         ICHECK_EQ(logits->shape[0], num_rsentries);
@@ -135,6 +142,8 @@ class EagleBatchDraftActionObj : public EngineActionObj {
         // - Compute probability distributions.
         NDArray probs_on_device =
             logit_processor_->ComputeProbsFromLogits(logits, generation_cfg, request_ids);
+
+        // (*printer)(probs_on_device, "probs_on_device");
 
         // - Sample tokens.
         // Fill range [0, num_rsentries) into `sample_indices`.
@@ -152,6 +161,7 @@ class EagleBatchDraftActionObj : public EngineActionObj {
                                              &model_workspaces_[0].draft_probs_storage);
         // No need to save hidden states as they are not used by subsequent engine actions
         for (int i = 0; i < num_rsentries; ++i) {
+          LOG(INFO) << "AddDraftToken: " << sample_results[i].sampled_token_id.first;
           mstates[i]->AddDraftToken(sample_results[i], draft_token_slots_[i]);
           estate->stats.total_draft_length += 1;
         }

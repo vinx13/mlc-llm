@@ -86,6 +86,7 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
     ObjectRef hidden_states_for_input{nullptr};
     ObjectRef hidden_states_for_sample{nullptr};
     NDArray logits_for_sample{nullptr};
+    const PackedFunc* printer = tvm::runtime::Registry::Get("tvm.debug.dump_ndarray");
     // A map used to record the entry and child_idx pair needed to fork sequence.
     // The base model (id 0) should record all the pairs and all the small models
     // fork sequences according to this map.
@@ -102,6 +103,15 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         RequestModelState mstate = rsentry->mstates[model_id];
         auto [input_data, input_length] =
             ChunkPrefillInputData(mstate, prefill_inputs[i].max_prefill_length);
+        for (const Data& data : input_data) {
+          TokenData tk_data = Downcast<TokenData>(data);
+          std::ostringstream oss;
+          oss << "TokenData: for model " << model_id << "\n";
+          for (int token : tk_data->token_ids) {
+            oss << token << " ";
+          }
+          LOG(INFO) << oss.str();
+        }
         if (prefill_lengths[i] == -1) {
           prefill_lengths[i] = input_length;
         } else {
@@ -131,38 +141,68 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
         int embed_offset =
             prefill_inputs[i].rsentry->mstates[model_id]->committed_tokens.empty() ? 0 : 1;
         for (int j = 0; j < static_cast<int>(input_data.size()); ++j) {
-          if (j == static_cast<int>(input_data.size()) - 1) {
+          if (model_id == 0) {
+            if (model_id == 1) {
+              TokenData tk_data = Downcast<TokenData>(input_data[i]);
+              std::ostringstream oss;
+              for (int token : tk_data->token_ids) {
+                oss << token << " ";
+              }
+              oss << " embed_offset: " << embed_offset << " "
+                  << " cum_prefill_length: " << cum_prefill_length
+                  << " single_input: " << single_input;
+              LOG(INFO) << "TokenEmbed: " << oss.str();
+            }
+            embeddings = input_data[i]->GetEmbedding(
+                models_[model_id],
+                /*dst=*/!single_input ? &model_workspaces_[model_id].embeddings : nullptr,
+                /*offset=*/cum_prefill_length);
+            cum_prefill_length += input_data[j]->GetLength();
+          } else {
+            int embed_offset = 1;
+            // TODO: handle chunk prefill
             std::vector<int32_t> tail_tokens;
             TokenData tk_data = Downcast<TokenData>(input_data[j]);
             CHECK(tk_data.defined());
             for (int k = embed_offset; k < static_cast<int>(tk_data->token_ids.size()); ++k) {
               tail_tokens.push_back(tk_data->token_ids[k]);
             }
+            tail_tokens.push_back(
+                rsentry->mstates[model_id]->committed_tokens.back().sampled_token_id.first);
+            std::ostringstream oss;
+            for (int token : tail_tokens) {
+              oss << token << " ";
+            }
+            oss << " token.size() = " << tail_tokens.size() << " embed_offset: " << embed_offset
+                << " "
+                << " cum_prefill_length: " << cum_prefill_length
+                << " single_input: " << single_input;
+            if (model_id == 1) {
+              LOG(INFO) << "TokenEmbed: " << oss.str();
+            }
             embeddings = models_[model_id]->TokenEmbed(
                 {tail_tokens.begin(), tail_tokens.end()},
                 /*dst=*/!single_input ? &model_workspaces_[model_id].embeddings : nullptr,
                 /*offset=*/cum_prefill_length);
             cum_prefill_length += input_data[j]->GetLength();
-            cum_prefill_length -= embed_offset;
-          } else {
-            embeddings = input_data[i]->GetEmbedding(
-                models_[model_id],
-                /*dst=*/!single_input ? &model_workspaces_[model_id].embeddings : nullptr,
-                /*offset=*/cum_prefill_length);
-            cum_prefill_length += input_data[j]->GetLength();
+            // cum_prefill_length -= embed_offset;
+            if (model_id == 1) {
+              LOG(INFO) << "cum_prefill_length: " << cum_prefill_length;
+              // (*printer)(embeddings, "embeddings");
+            }
           }
         }
-        if (embed_offset > 0) {
-          std::vector<int32_t> new_tokens = {prefill_inputs[i]
-                                                 .rsentry->mstates[model_id]
-                                                 ->committed_tokens.back()
-                                                 .sampled_token_id.first};
-          embeddings =
-              models_[model_id]->TokenEmbed({new_tokens.begin(), new_tokens.end()},
-                                            /*dst=*/&model_workspaces_[model_id].embeddings,
-                                            /*offset=*/cum_prefill_length);
-          cum_prefill_length += new_tokens.size();
-        }
+        // if (embed_offset > 0) {
+        //   std::vector<int32_t> new_tokens = {prefill_inputs[i]
+        //                                          .rsentry->mstates[model_id]
+        //                                          ->committed_tokens.back()
+        //                                          .sampled_token_id.first};
+        //   embeddings =
+        //       models_[model_id]->TokenEmbed({new_tokens.begin(), new_tokens.end()},
+        //                                     /*dst=*/&model_workspaces_[model_id].embeddings,
+        //                                     /*offset=*/cum_prefill_length);
+        //   cum_prefill_length += new_tokens.size();
+        // }
         RECORD_EVENT(trace_recorder_, rsentry->request->id, "finish embedding");
       }
 
@@ -171,6 +211,7 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
       if (model_id == 0) {
         embedding_or_hidden_states = embeddings;
       } else {
+        // (*printer)(hidden_states_for_input, "hidden_states");
         embedding_or_hidden_states = models_[model_id]->FuseEmbedHidden(
             embeddings, hidden_states_for_input, /*batch_size*/ 1, /*seq_len*/ cum_prefill_length);
       }
@@ -203,6 +244,7 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
       // logits_for_sample: (b * s, v)
       logits_for_sample =
           models_[sample_model_id]->GetLogits(hidden_states_for_sample, 1, num_rsentries);
+      // (*printer)(logits_for_sample, "logits_for_sample");
       // - Update logits.
       ICHECK(logits_for_sample.defined());
       Array<GenerationConfig> generation_cfg;
@@ -303,6 +345,8 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
       if (model_id == 0) {
         for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
           for (int mid = 0; mid < static_cast<int>(models_.size()); ++mid) {
+            LOG(INFO) << "CommitToken: " << sample_results[i].sampled_token_id.first
+                      << " from prefill";
             rsentries_for_sample[i]->mstates[mid]->CommitToken(sample_results[i]);
             if (!rsentry_activated[i]) {
               // When the child rsentry is not activated,
@@ -327,6 +371,8 @@ class EagleNewRequestPrefillActionObj : public EngineActionObj {
                                                  &model_workspaces_[0].draft_hidden_states_storage);
         }
         for (int i = 0; i < static_cast<int>(rsentries_for_sample.size()); ++i) {
+          LOG(INFO) << "AddDraftToken: " << sample_results[i].sampled_token_id.first
+                    << " from prefill";
           rsentries_for_sample[i]->mstates[model_id]->AddDraftToken(sample_results[i],
                                                                     draft_token_slots_[i]);
           estate->stats.total_draft_length += 1;
