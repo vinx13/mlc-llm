@@ -28,6 +28,7 @@ class OptimizationFlags:
 
     flashinfer: bool = False
     cublas_gemm: bool = False
+    hipblas_gemm: bool = False
     faster_transformer: bool = False
     cudagraph: bool = False
     cutlass: bool = False
@@ -37,6 +38,7 @@ class OptimizationFlags:
         out = StringIO()
         print(f"flashinfer={int(self.flashinfer)}", file=out, end="")
         print(f";cublas_gemm={int(self.cublas_gemm)}", file=out, end="")
+        print(f";hipblas_gemm={int(self.hipblas_gemm)}", file=out, end="")
         print(f";faster_transformer={int(self.faster_transformer)}", file=out, end="")
         print(f";cudagraph={int(self.cudagraph)}", file=out, end="")
         print(f";cutlass={int(self.cutlass)}", file=out, end="")
@@ -60,6 +62,7 @@ class OptimizationFlags:
         parser = argparse.ArgumentParser(description="optimization flags")
         parser.add_argument("--flashinfer", type=boolean, default=True)
         parser.add_argument("--cublas_gemm", type=boolean, default=False)
+        parser.add_argument("--hipblas_gemm", type=boolean, default=False)
         parser.add_argument("--faster_transformer", type=boolean, default=False)
         parser.add_argument("--cudagraph", type=boolean, default=False)
         parser.add_argument("--cutlass", type=boolean, default=False)
@@ -112,6 +115,18 @@ class OptimizationFlags:
                 return False
             return self.cublas_gemm
 
+        def _hipblas_gemm(target, quantization) -> bool:
+            """correct hipblas_gemm flag"""
+            if not target.kind.name == "rocm":
+                return False
+            if not (
+                quantization.name in ["q0f16", "q0f32"]
+                or "e4m3" in quantization.name
+                or "e5m2" in quantization.name
+            ):
+                return False
+            return self.hipblas_gemm
+
         def _faster_transformer(target) -> bool:
             """correct faster_transformer flag"""
             if not target.kind.name == "cuda":
@@ -132,6 +147,7 @@ class OptimizationFlags:
 
         self.flashinfer = _flashinfer(target)
         self.cublas_gemm = _cublas_gemm(target, quantization)
+        self.hipblas_gemm = _hipblas_gemm(target, quantization)
         self.faster_transformer = _faster_transformer(target)
         self.cutlass = _cutlass(target)
         self.cudagraph = _cudagraph(target)
@@ -192,6 +208,7 @@ OPT_FLAG_PRESET = {
     "O1": OptimizationFlags(
         flashinfer=False,
         cublas_gemm=True,
+        hipblas_gemm=True,
         faster_transformer=True,
         cudagraph=False,
         cutlass=True,
@@ -199,6 +216,7 @@ OPT_FLAG_PRESET = {
     "O2": OptimizationFlags(
         flashinfer=True,
         cublas_gemm=True,
+        hipblas_gemm=True,
         faster_transformer=False,
         cudagraph=True,
         cutlass=True,
@@ -206,6 +224,7 @@ OPT_FLAG_PRESET = {
     "O3": OptimizationFlags(
         flashinfer=True,
         cublas_gemm=True,
+        hipblas_gemm=True,
         faster_transformer=True,
         cudagraph=True,
         cutlass=True,

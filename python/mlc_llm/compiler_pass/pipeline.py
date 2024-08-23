@@ -80,6 +80,7 @@ def _mlc_llm_pipeline(  # pylint: disable=too-many-arguments
     target: tvm.target.Target,
     flashinfer: bool = False,
     cublas_gemm: bool = False,
+    hipblas_gemm: bool = False,
     faster_transformer: bool = False,  # pylint: disable=unused-argument
     allreduce_strategy: IPCAllReduceStrategyType = IPCAllReduceStrategyType.NONE,
     variable_bounds: Dict[str, int] = None,
@@ -118,7 +119,11 @@ def _mlc_llm_pipeline(  # pylint: disable=too-many-arguments
                 _LogProgress("Running TVM Relax graph-level optimizations"),
                 FuseFTDequantizeEpilogue(),
                 FuseDequantizeTranspose(),
-                CublasDispatch() if cublas_gemm else tvm.transform.Sequential([]),
+                (
+                    CublasDispatch(backend="cublas" if cublas_gemm else "hipblas")
+                    if cublas_gemm or hipblas_gemm
+                    else tvm.transform.Sequential([])
+                ),
                 FuseAddRMSNorm(target=target),
                 FuseTransposeMatmul(),
                 _DebugDump("debug-phase1.py", debug_dump, show_meta=False),
